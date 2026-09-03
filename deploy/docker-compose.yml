@@ -1,0 +1,80 @@
+# Cally AI Guard — the whole free stack, one command.
+#
+#   cp .env.example .env   &&   edit .env
+#   docker compose up -d
+#
+# Runs fine on an Oracle Cloud "Always Free" Ampere VM (4 vCPU / 24 GB).
+# The only thing this does NOT include is the phone line — point a Telnyx SIP
+# trunk (or a GSM gateway's SIP account) at the livekit-sip service. See DEPLOY.md.
+
+services:
+  livekit:
+    image: livekit/livekit-server:v1.8
+    command: --config /etc/livekit.yaml
+    restart: unless-stopped
+    network_mode: host          # LiveKit needs a wide UDP range for media
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+
+  livekit-sip:
+    image: livekit/sip:latest
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SIP_CONFIG_BODY: |
+        api_key: ${LIVEKIT_API_KEY}
+        api_secret: ${LIVEKIT_API_SECRET}
+        ws_url: ws://127.0.0.1:7880
+        sip_port: 5060
+        rtp_port: 10000-20000
+        use_external_ip: true
+    depends_on: [livekit]
+
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    restart: unless-stopped
+    environment:
+      WHISPER__MODEL: Systran/faster-whisper-small
+      WHISPER__INFERENCE_DEVICE: cpu
+    ports: ["8000:8000"]
+    volumes: ["whisper-cache:/root/.cache"]
+
+  piper:
+    image: rhasspy/wyoming-piper:latest
+    restart: unless-stopped
+    command: --voice tr_TR-fahrettin-medium --http-port 5000
+    ports: ["5000:5000"]
+    volumes: ["piper-data:/data"]
+
+  worker:
+    build:
+      context: ..                       # the whole @cally/guard package
+      dockerfile: deploy/worker/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    environment:
+      LIVEKIT_URL: ws://127.0.0.1:7880
+      WHISPER_URL: http://127.0.0.1:8000
+      PIPER_URL: http://127.0.0.1:5000
+    depends_on: [livekit, whisper, piper]
+
+  # guard_reports (phone) ─▶ learning review queue. Every 15 min. Needs the
+  # guard API (server.mjs) reachable at GUARD_API_URL and a Firebase service
+  # account. Nothing trains automatically — an admin still approves each example
+  # in GuardLearning.tsx.
+  ingest:
+    build:
+      context: ..
+      dockerfile: deploy/worker/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    environment:
+      GUARD_API_URL: http://127.0.0.1:8080
+    entrypoint: ["/bin/sh", "-c", "while true; do node jobs/ingest-reports.mjs || true; sleep 900; done"]
+    depends_on: [worker]
+
+volumes:
+  whisper-cache:
+  piper-data:

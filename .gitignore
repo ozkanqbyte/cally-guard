@@ -1,0 +1,6 @@
+node_modules/
+voice-preview/
+local.keys
+.env
+*.log
+*.tar.gz

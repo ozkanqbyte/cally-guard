@@ -1,0 +1,19 @@
+port: 7880
+bind_addresses: ["0.0.0.0"]
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+
+keys:
+  # matches LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env
+  devkey: change-me-to-a-long-random-string
+
+sip:
+  # allow the livekit-sip service to register
+  enabled: true
+
+logging:
+  level: info
