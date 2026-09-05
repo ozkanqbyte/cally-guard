@@ -7,13 +7,12 @@ rtc:
   port_range_end: 60000
   use_external_ip: true
 
+redis:
+  address: 127.0.0.1:6379
+
 keys:
   # matches LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env
-  devkey: change-me-to-a-long-random-string
-
-sip:
-  # allow the livekit-sip service to register
-  enabled: true
+  devkey: 9WoPUzuRHXTnUt256qUXcqd4lZ9LDFB5MiYRm6TQ
 
 logging:
   level: info

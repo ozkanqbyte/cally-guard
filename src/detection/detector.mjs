@@ -70,11 +70,34 @@ function withOverlay(compiled, overlay) {
   return { ...compiled, signals, byId: new Map(signals.map((s) => [s.id, s])) };
 }
 
-/** @param {number} score @returns {Band} */
-export function bandFor(score) {
-  if (score >= 80) return 'severe';
-  if (score >= 50) return 'high';
-  if (score >= 25) return 'elevated';
+/**
+ * Admin-tunable signal weights ({ [signalId]: number }), from the admin panel
+ * (`guard_config/{locale}` in Firestore). Absent / invalid entries keep the
+ * locale pack's built-in weight — this can only re-tune sensitivity, never
+ * add or remove a signal.
+ */
+function withWeightOverrides(compiled, weightOverrides) {
+  if (!weightOverrides || !Object.keys(weightOverrides).length) return compiled;
+  const signals = compiled.signals.map((s) => {
+    const w = weightOverrides[s.id];
+    return (typeof w === 'number' && Number.isFinite(w) && w >= 0) ? { ...s, weight: w } : s;
+  });
+  return { ...compiled, signals, byId: new Map(signals.map((s) => [s.id, s])) };
+}
+
+/**
+ * @param {number} score
+ * @param {{severe?:number, high?:number, elevated?:number}} [thresholds]
+ *   admin-tunable cutoffs (`guard_config/{locale}` in Firestore); each
+ *   defaults to the built-in value when absent, so every existing caller
+ *   that doesn't pass a second argument sees exactly today's behavior.
+ * @returns {Band}
+ */
+export function bandFor(score, thresholds = {}) {
+  const { severe = 80, high = 50, elevated = 25 } = thresholds;
+  if (score >= severe) return 'severe';
+  if (score >= high) return 'high';
+  if (score >= elevated) return 'elevated';
   return 'low';
 }
 
@@ -84,12 +107,17 @@ export function bandFor(score) {
  */
 export class DetectionSession {
   /**
-   * @param {{ locale?: string | object, overlay?: Record<string,string[][]> }} [opts]
+   * @param {{ locale?: string | object, overlay?: Record<string,string[][]>,
+   *           weightOverrides?: Record<string,number>,
+   *           thresholds?: {severe?:number, high?:number, elevated?:number} }} [opts]
    *   locale code ('tr' default) or an inline pack; `overlay` = extra folded
-   *   phrase-groups per signal id (from `LexiconOverlay.get(locale)`).
+   *   phrase-groups per signal id (from `LexiconOverlay.get(locale)`);
+   *   `weightOverrides` / `thresholds` = admin-tunable scoring knobs (from
+   *   `guard_config/{locale}`) — both default to the built-in behavior.
    */
   constructor(opts = {}) {
-    this._lex = withOverlay(localeFor(opts.locale), opts.overlay);
+    this._lex = withWeightOverrides(withOverlay(localeFor(opts.locale), opts.overlay), opts.weightOverrides);
+    this._thresholds = opts.thresholds ?? {};
     /** @type {Set<string>} */
     this._seen = new Set();
     this._text = '';
@@ -182,7 +210,7 @@ export class DetectionSession {
     return {
       score: this._score,
       confidence,
-      band: bandFor(this._score),
+      band: bandFor(this._score, this._thresholds),
       signals: reasons.map((r) => r.id),
       reasons,
       recommendGuard: this._score >= GUARD_SCORE && confidence >= GUARD_CONFIDENCE,

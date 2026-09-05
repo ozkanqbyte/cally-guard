@@ -54,7 +54,7 @@ export class DeepgramStt {
     url.searchParams.set('model', this._model);
     url.searchParams.set('language', this._language);
     url.searchParams.set('encoding', 'linear16');
-    url.searchParams.set('sample_rate', '8000');       // GSM narrowband
+    url.searchParams.set('sample_rate', '16000');      // matches our AudioStream(caller, 16000, 1)
     url.searchParams.set('channels', '1');
     url.searchParams.set('interim_results', 'true');
     url.searchParams.set('endpointing', String(this._endpointingMs));
@@ -65,7 +65,12 @@ export class DeepgramStt {
     // Node 22+ has global WebSocket; older runtimes: import 'ws'.
     this._ws = new WebSocket(url, { headers: { Authorization: `Token ${this._apiKey}` } });
 
+    this._ws.addEventListener('open', () => console.log('[deepgram] socket open'));
+    this._ws.addEventListener('close', (evt) => console.log('[deepgram] socket closed', evt.code, evt.reason));
+    this._ws.addEventListener('error', (evt) => console.log('[deepgram] socket error', evt.message || evt));
+
     this._ws.addEventListener('message', (evt) => {
+      console.log('[deepgram] msg:', typeof evt.data === 'string' ? evt.data.slice(0, 200) : '<binary>');
       const msg = JSON.parse(evt.data);
       if (msg.type !== 'Results') return;
       const alt = msg.channel?.alternatives?.[0];

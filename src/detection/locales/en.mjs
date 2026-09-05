@@ -158,6 +158,117 @@ export const signals = [
       ['won a gift card'], ['won a cash prize'], ['congratulations you are a winner'],
     ],
   },
+  {
+    id: 'task_job_scam',
+    label: 'Task-based easy-money scam',
+    severity: 'medium',
+    weight: 20,
+    anyOf: [
+      ['earn by completing tasks'], ['daily tasks'], ['like products to earn'],
+      ['leave reviews to earn'], ['task on telegram'], ['task on whatsapp'],
+      ['membership fee to start'], ['your team leader'], ['task link'],
+      ['guaranteed daily earnings'],
+    ],
+  },
+  {
+    id: 'tech_support_scam',
+    label: 'Fake tech support / virus warning',
+    severity: 'high',
+    weight: 24,
+    anyOf: [
+      ['virus detected on your computer'], ['your computer has been hacked'],
+      ['your system has been breached'], ['microsoft support'],
+      ['windows security alert'], ['let us remote into your computer'],
+      ['our technician will connect'], ['security vulnerability on your device'],
+    ],
+  },
+  {
+    id: 'romance_scam',
+    label: 'Romance / emotional-manipulation scam',
+    severity: 'medium',
+    weight: 18,
+    anyOf: [
+      ['i love you', 'money'], ['i am overseas', 'money'],
+      ['just between us', 'send money'], ['i want to marry you'],
+      ['my gift is stuck at customs'], ['deployed overseas', 'send money'],
+      ['platform fee', 'love'], ['i was coming to see you but'],
+    ],
+  },
+  {
+    id: 'fake_loan_credit',
+    label: 'Fake loan / credit-limit-increase scam',
+    severity: 'medium',
+    weight: 20,
+    anyOf: [
+      ['your loan has been approved'], ['increase your limit', 'fee'],
+      ['no upfront fee loan'], ['loan processing fee'], ['loan application fee'],
+      ['interest free loan offer'], ['your credit score has been upgraded'],
+    ],
+  },
+  {
+    id: 'sim_swap_request',
+    label: 'SIM swap / carrier-transfer trap',
+    severity: 'high',
+    weight: 26,
+    anyOf: [
+      ['swap your sim card'], ['transfer your number to a new device'],
+      ['sim card renewal'], ['carrier', 'sim swap'],
+      ['port your number to a new sim'], ['esim activation code'],
+    ],
+  },
+  {
+    id: 'fake_court_fine',
+    label: 'Fake traffic fine / debt-collection threat',
+    severity: 'high',
+    weight: 22,
+    anyOf: [
+      ['unpaid fine'], ['your traffic ticket'], ['collections process will start'],
+      ['assets will be seized'], ['because of your debt'], ['you will appear in court'],
+      ['enforcement action', 'payment'], ['debt collection agency'],
+    ],
+  },
+  {
+    id: 'charity_disaster_scam',
+    label: 'Fake charity / disaster-relief scam',
+    severity: 'medium',
+    weight: 16,
+    anyOf: [
+      ['earthquake donation'], ['disaster relief fund'], ['donation account'],
+      ['support our relief campaign'], ['funds go to the victims'],
+    ],
+  },
+  {
+    id: 'impersonation_new_number',
+    label: 'New number — hijacked-contact impersonation',
+    severity: 'high',
+    weight: 22,
+    anyOf: [
+      ['texting from my new number'], ['my phone number changed'],
+      ['lost my old number'], ['reaching you from this number now'],
+      ['whatsapp account changed'], ['urgently need money', 'new number'],
+    ],
+  },
+  {
+    id: 'subscription_cancel_scam',
+    label: 'Fake subscription renewal / cancellation scam',
+    severity: 'low',
+    weight: 12,
+    anyOf: [
+      ['your subscription will renew'], ['cancel your membership', 'card'],
+      ['automatic payment authorization'], ['charge will apply if you do not cancel'],
+    ],
+  },
+  {
+    id: 'fake_job_offer_upfront_fee',
+    label: 'Fake job offer / upfront-fee scam',
+    severity: 'medium',
+    weight: 18,
+    anyOf: [
+      ['you have been hired', 'fee'], ['pay for paperwork'],
+      ['pay for equipment'], ['pay a placement fee'], ['pay for training materials'],
+      ['guaranteed job, just pay'],
+    ],
+  },
 ];
 
 export const benignMarkers = [

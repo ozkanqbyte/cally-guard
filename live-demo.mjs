@@ -23,6 +23,9 @@ const PORT = process.env.PORT || 8790;
 const EL_KEY = process.env.ELEVENLABS_API_KEY;
 const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_turbo_v2_5';
 const EL_VOICE = process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'; // premade "Sarah"
+const CAR_KEY = process.env.CARTESIA_API_KEY;
+const CAR_VOICE = process.env.CARTESIA_VOICE_ID;
+const CAR_MODEL = process.env.CARTESIA_MODEL || 'sonic-3';
 
 // Conversational LLM (Gemini/OpenAI/Claude — auto from whichever key is set).
 // The rules still decide the move + when to hang up + the safety net; the LLM
@@ -58,7 +61,13 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname === '/config') {
     res.writeHead(200, { 'content-type': 'application/json', ...cors });
-    return res.end(JSON.stringify({ voice: !!EL_KEY, model: EL_MODEL, llm: !!converse && llmOk !== false }));
+    return res.end(JSON.stringify({
+      voice: !!EL_KEY || !!(CAR_KEY && CAR_VOICE),
+      elevenlabs: !!EL_KEY,
+      cartesia: !!(CAR_KEY && CAR_VOICE),
+      model: EL_MODEL,
+      llm: !!converse && llmOk !== false,
+    }));
   }
 
   if (url.pathname === '/open' && req.method === 'POST') {
@@ -97,7 +106,28 @@ const server = createServer(async (req, res) => {
   }
 
   if (url.pathname === '/tts' && req.method === 'POST') {
-    const { text } = await readBody(req);
+    const { text, provider } = await readBody(req);
+    if (provider === 'cartesia') {
+      if (!CAR_KEY || !CAR_VOICE) { res.writeHead(400, { ...cors, 'content-type': 'text/plain' }); return res.end('CARTESIA_API_KEY / CARTESIA_VOICE_ID yok'); }
+      try {
+        const r = await fetch('https://api.cartesia.ai/tts/bytes', {
+          method: 'POST',
+          headers: { 'Cartesia-Version': '2024-11-13', 'X-API-Key': CAR_KEY, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model_id: CAR_MODEL,
+            transcript: String(text || ''),
+            language: 'tr',
+            voice: { mode: 'id', id: CAR_VOICE },
+            output_format: { container: 'wav', encoding: 'pcm_s16le', sample_rate: 44100 },
+          }),
+        });
+        if (!r.ok) { res.writeHead(502, { ...cors, 'content-type': 'text/plain' }); return res.end(`Cartesia ${r.status}: ${await r.text()}`); }
+        res.writeHead(200, { 'content-type': 'audio/wav', ...cors });
+        return res.end(Buffer.from(await r.arrayBuffer()));
+      } catch (e) {
+        res.writeHead(502, { ...cors, 'content-type': 'text/plain' }); return res.end(String(e.message));
+      }
+    }
     if (!EL_KEY) { res.writeHead(400, { ...cors, 'content-type': 'text/plain' }); return res.end('ELEVENLABS_API_KEY yok'); }
     try {
       const r = await fetch(
@@ -226,7 +256,10 @@ button:disabled{opacity:.5}
   <input id="in" placeholder="Yaz: bankadan arıyorum, kodu okuyun…" autocomplete="off">
   <button class="send" id="send">Gönder</button>
 </div>
-<div class="bar"><button class="ghost" id="reset">Yeniden başlat</button></div>
+<div class="bar">
+  <button class="ghost" id="reset">Yeniden başlat</button>
+  <button class="ghost" id="voiceToggle">Ses: ElevenLabs</button>
+</div>
 <p class="hint" id="hint"></p>
 </div>
 
@@ -235,6 +268,7 @@ const id = 'live-' + Math.random().toString(36).slice(2);
 const $ = s => document.querySelector(s);
 const log = $('#log');
 let ended = false, busy = false, started = false, cfg = { voice:false, llm:false };
+let voiceProvider = 'elevenlabs';
 
 function esc(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function bubble(who, text, cls){
@@ -248,7 +282,7 @@ function setRisk(score, band){ $('#fill').style.width=Math.max(2,score)+'%'; $('
 async function say(text){
   if(!cfg.voice) return;
   try{
-    const r = await fetch('/tts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text})});
+    const r = await fetch('/tts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text, provider: voiceProvider})});
     if(!r.ok){ note('err', 'ses hatası: ' + (await r.text()).slice(0,120)); return; }
     const a = new Audio(URL.createObjectURL(await r.blob()));
     await a.play().catch(e => note('err','ses çalınamadı: '+e.message));
@@ -276,6 +310,10 @@ async function turn(text){
 $('#send').onclick = () => { const v=$('#in').value; $('#in').value=''; turn(v); };
 $('#in').onkeydown = e => { if(e.key==='Enter'){ const v=$('#in').value; $('#in').value=''; turn(v); } };
 $('#reset').onclick = open;
+$('#voiceToggle').onclick = () => {
+  voiceProvider = voiceProvider === 'elevenlabs' ? 'cartesia' : 'elevenlabs';
+  $('#voiceToggle').textContent = 'Ses: ' + (voiceProvider === 'elevenlabs' ? 'ElevenLabs' : 'Cartesia');
+};
 
 // mic
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;

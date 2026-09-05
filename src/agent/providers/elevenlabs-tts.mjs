@@ -52,6 +52,7 @@ export class ElevenLabsTts {
     this._voiceId = voiceId;
     this._model = model;
     this._output = output;
+    this.sampleRate = FORMATS[output].rate;
     this._language = language;
     this._voiceSettings = voiceSettings;
   }

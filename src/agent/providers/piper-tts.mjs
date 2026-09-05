@@ -8,12 +8,13 @@
  * service (e.g. the `rhasspy/wyoming-piper` container behind a tiny HTTP shim,
  * or `piper` compiled with `--http`).
  */
-const SAMPLE_RATE = 16000;
+const SAMPLE_RATE = 22050; // native rate of tr_TR-dfki-medium (see piper-voice/*.onnx.json)
 
 export class PiperTts {
   constructor({ baseUrl = 'http://piper:5000', voice = 'tr_TR-fahrettin-medium' } = {}) {
     this._baseUrl = baseUrl.replace(/\/$/, '');
     this._voice = voice;
+    this.sampleRate = SAMPLE_RATE;
   }
 
   /**

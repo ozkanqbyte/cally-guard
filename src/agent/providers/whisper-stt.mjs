@@ -14,7 +14,7 @@ import { HOT_WORDS } from '../../detection/lexicon.mjs';
 
 const SAMPLE_RATE = 16000;
 const SILENCE_RMS = 0.012;
-const SILENCE_MS = 700;
+const SILENCE_MS = 450; // tuned down from 700 for faster turn-taking
 const MIN_SEGMENT_MS = 600;
 const MAX_SEGMENT_MS = 12000;
 

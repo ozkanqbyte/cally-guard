@@ -25,6 +25,8 @@ services:
         api_key: ${LIVEKIT_API_KEY}
         api_secret: ${LIVEKIT_API_SECRET}
         ws_url: ws://127.0.0.1:7880
+        redis:
+          address: 127.0.0.1:6379
         sip_port: 5060
         rtp_port: 10000-20000
         use_external_ip: true
@@ -36,15 +38,18 @@ services:
     environment:
       WHISPER__MODEL: Systran/faster-whisper-small
       WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8
     ports: ["8000:8000"]
     volumes: ["whisper-cache:/root/.cache"]
 
   piper:
     image: rhasspy/wyoming-piper:latest
     restart: unless-stopped
-    command: --voice tr_TR-fahrettin-medium --http-port 5000
+    entrypoint: ["python3", "/shim/piper_http_shim.py"]
     ports: ["5000:5000"]
-    volumes: ["piper-data:/data"]
+    volumes:
+      - ./piper-voice:/data:ro
+      - ./piper_http_shim.py:/shim/piper_http_shim.py:ro
 
   worker:
     build:
@@ -53,6 +58,8 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file: .env
+    volumes:
+      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
     environment:
       LIVEKIT_URL: ws://127.0.0.1:7880
       WHISPER_URL: http://127.0.0.1:8000
@@ -70,6 +77,8 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file: .env
+    volumes:
+      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
     environment:
       GUARD_API_URL: http://127.0.0.1:8080
     entrypoint: ["/bin/sh", "-c", "while true; do node jobs/ingest-reports.mjs || true; sleep 900; done"]

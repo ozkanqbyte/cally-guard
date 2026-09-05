@@ -176,6 +176,118 @@ export const signals = [
       ['ödülünüzü almak için'],
     ],
   },
+  {
+    id: 'task_job_scam',
+    label: 'Görev bazlı kolay para kazanma dolandırıcılığı',
+    severity: 'medium',
+    weight: 20,
+    anyOf: [
+      ['görev yaparak kazan'], ['günlük görev'], ['ürün beğenerek kazan'],
+      ['yorum yaparak kazan'], ['telegram üzerinden görev'],
+      ['whatsapp üzerinden görev'], ['ön ödeme yaparak görev'],
+      ['üyelik ücreti yatır'], ['grup lideriniz'], ['görev linkine tıkla'],
+      ['takip görevleri'], ['günlük kazanç garantili'],
+    ],
+  },
+  {
+    id: 'tech_support_scam',
+    label: 'Sahte teknik destek / virüs uyarısı',
+    severity: 'high',
+    weight: 24,
+    anyOf: [
+      ['bilgisayarınızda virüs'], ['bilgisayarınız hacklendi'],
+      ['sisteminize sızıl'], ['microsoft destek'], ['windows güvenlik'],
+      ['bilgisayarınıza uzaktan bağlan'], ['teknik ekibimiz bağlanacak'],
+      ['cihazınızda güvenlik açığı'], ['virüs tespit edildi'],
+    ],
+  },
+  {
+    id: 'romance_scam',
+    label: 'Romantizm / duygusal manipülasyon dolandırıcılığı',
+    severity: 'medium',
+    weight: 18,
+    anyOf: [
+      ['seni seviyorum', 'para'], ['yurt dışındayım', 'para'],
+      ['aramızda kalsın', 'para gönder'], ['seninle evlenmek istiyorum'],
+      ['gümrükte hediye paketim'], ['askerdeyim', 'para gönder'],
+      ['platform ücreti', 'aşk'], ['seni görmeye gelecektim ama'],
+    ],
+  },
+  {
+    id: 'fake_loan_credit',
+    label: 'Sahte kredi / limit artırma dolandırıcılığı',
+    severity: 'medium',
+    weight: 20,
+    anyOf: [
+      ['krediniz onaylandı'], ['limit artırma', 'ücret'],
+      ['ön ödemesiz kredi'], ['kredi masrafı yatır'], ['kredi dosya ücreti'],
+      ['faizsiz kredi fırsatı'], ['kredi puanınız yükseltildi'],
+    ],
+  },
+  {
+    id: 'sim_swap_request',
+    label: 'SIM kart değişikliği / hat taşıma tuzağı',
+    severity: 'high',
+    weight: 26,
+    anyOf: [
+      ['sim kartınızı değiştir'], ['hattınızı yeni cihaza taşı'],
+      ['sim kart yenileme'], ['operatör', 'sim değişim'],
+      ['numaranızı yeni hatta aktar'], ['e-sim aktivasyon kodu'],
+    ],
+  },
+  {
+    id: 'fake_court_fine',
+    label: 'Sahte trafik cezası / icra borcu tehdidi',
+    severity: 'high',
+    weight: 22,
+    anyOf: [
+      ['ödenmemiş cezanız'], ['trafik cezanız'], ['icra takibi başlat'],
+      ['haciz gelecek'], ['borcunuz nedeniyle'], ['mahkemeye çıkacaksınız'],
+      ['infaz', 'ödeme'], ['icra dairesi'],
+    ],
+  },
+  {
+    id: 'charity_disaster_scam',
+    label: 'Sahte bağış / afet yardımı dolandırıcılığı',
+    severity: 'medium',
+    weight: 16,
+    anyOf: [
+      ['deprem bağışı'], ['afet yardımı toplu'], ['bağış hesabına'],
+      ['yardım kampanyasına destek'], ['mağdurlara ulaştırılacak'],
+    ],
+  },
+  {
+    id: 'impersonation_new_number',
+    label: 'Yeni numaram — çalıntı hesap taklidi',
+    severity: 'high',
+    weight: 22,
+    anyOf: [
+      ['yeni numaramdan yazıyorum'], ['telefonum değişti'],
+      ['eski numaramı kaybettim'], ['bu numaradan ulaşıyorum artık'],
+      ['whatsapp hesabım değişti'], ['acil paraya ihtiyacım var', 'yeni'],
+    ],
+  },
+  {
+    id: 'subscription_cancel_scam',
+    label: 'Sahte abonelik yenileme / iptal dolandırıcılığı',
+    severity: 'low',
+    weight: 12,
+    anyOf: [
+      ['aboneliğiniz yenilenecek'], ['üyeliğinizi iptal etmek için kart'],
+      ['otomatik ödeme talimatı'], ['iptal etmezseniz tahsilat'],
+    ],
+  },
+  {
+    id: 'fake_job_offer_upfront_fee',
+    label: 'Sahte iş teklifi / peşin ücret dolandırıcılığı',
+    severity: 'medium',
+    weight: 18,
+    anyOf: [
+      ['işe alındınız', 'ücret'], ['evrak masrafı yatır'],
+      ['malzeme ücreti yatır'], ['kontenjan ücreti'], ['staj ücreti öde'],
+      ['garantili iş, önce'],
+    ],
+  },
 ];
 
 export const benignMarkers = [

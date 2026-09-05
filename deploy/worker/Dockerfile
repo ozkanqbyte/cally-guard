@@ -11,4 +11,4 @@ COPY deploy/worker ./deploy/worker
 RUN cd deploy/worker && npm install --omit=dev
 
 WORKDIR /app/deploy/worker
-CMD ["node", "worker.mjs"]
+CMD ["node", "worker.mjs", "start"]

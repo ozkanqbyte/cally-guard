@@ -31,13 +31,18 @@ for (const line of JOIN_MID_CALL) {
 export class GuardCall {
   /**
    * @param {string} id
-   * @param {{mode?: 'inbound'|'joinMidCall', locale?: string, overlay?: object}} [opts]
+   * @param {{mode?: 'inbound'|'joinMidCall', locale?: string, overlay?: object,
+   *          weightOverrides?: Record<string,number>,
+   *          thresholds?: {severe?:number, high?:number, elevated?:number}}} [opts]
    */
   constructor(id, opts = {}) {
     this.id = id;
     this.mode = opts.mode ?? 'inbound';
     this.ended = false;
-    this._detector = new DetectionSession({ locale: opts.locale, overlay: opts.overlay });
+    this._detector = new DetectionSession({
+      locale: opts.locale, overlay: opts.overlay,
+      weightOverrides: opts.weightOverrides, thresholds: opts.thresholds,
+    });
     this._turn = 0;
     /** @type {import('./policy.mjs').Move} */
     this._lastMove = this.mode === 'joinMidCall' ? 'probe' : 'greet';

@@ -4,10 +4,15 @@
   "private": true,
   "type": "module",
   "description": "Cally AI Guard - real-time scam-call detection, number reputation and conversation policy (reference engine, zero dependencies).",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "test": "node --test",
     "demo": "node demo.mjs",
     "serve": "node --input-type=module -e \"import('./src/api/server.mjs').then(m=>{const s=m.createGuardServer();s.listen(process.env.PORT||8080,()=>console.log('Cally Guard API on :'+(process.env.PORT||8080)))})\""
+  },
+  "dependencies": {
+    "firebase-admin": "^13.10.0"
   }
 }

@@ -9,11 +9,12 @@
  *   agent = new VoiceAgent({ tts, ... });   // agent.speak() -> plays on the call
  */
 export class CartesiaTts {
-  constructor({ apiKey, voiceId, sampleRate = 16000, model = 'sonic-2' } = {}) {
+  constructor({ apiKey, voiceId, sampleRate = 16000, model = 'sonic-3' } = {}) {
     if (!apiKey || !voiceId) throw new Error('CartesiaTts: apiKey and voiceId required');
     this._apiKey = apiKey;
     this._voiceId = voiceId;
     this._sampleRate = sampleRate;
+    this.sampleRate = sampleRate;
     this._model = model;
   }
 
@@ -42,8 +43,8 @@ export class CartesiaTts {
       }),
     });
     if (!res.ok) throw new Error(`Cartesia TTS ${res.status}: ${await res.text()}`);
-    const audio = await res.arrayBuffer();
-    const samples = audio.byteLength / 2;
+    const audio = new Uint8Array(await res.arrayBuffer());
+    const samples = audio.length / 2;
     return { audio, durationMs: Math.round((samples / this._sampleRate) * 1000) };
   }
 }

@@ -58,7 +58,7 @@ const DEFAULT_MODEL = {
 // The conversation ("sohbet modu") needs to actually follow a dialogue and land
 // a human tone — worth the fuller model. ~600ms, fine for an unhurried caller.
 const DEFAULT_CONVERSE_MODEL = {
-  gemini: 'gemini-2.5-flash',
+  gemini: 'gemini-2.5-flash-lite', // tuned for latency over the fuller model
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
   deepseek: 'deepseek-chat',
@@ -145,7 +145,7 @@ export function makeLlmPolish({
 }
 
 /** Build the fetch args for one provider. Returns { url, init, pick }. */
-function buildCall(provider, { apiKey, model, baseUrl, user, system = SYSTEM }) {
+function buildCall(provider, { apiKey, model, baseUrl, user, system = SYSTEM, json = false }) {
   if (provider === 'gemini') {
     return {
       url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
@@ -156,11 +156,26 @@ function buildCall(provider, { apiKey, model, baseUrl, user, system = SYSTEM }) 
           system_instruction: { parts: [{ text: system }] },
           contents: [{ role: 'user', parts: [{ text: user }] }],
           generationConfig: {
-            maxOutputTokens: 200,
+            maxOutputTokens: json ? 260 : 200,
             temperature: 0.9,
             // no chain-of-thought: it burns the token budget and adds latency
             // that a live call cannot spend on a one-line reword
             thinkingConfig: { thinkingBudget: 0 },
+            // converse() asks for {reply, risk, reason} in one round trip —
+            // structured output so we never have to parse prose. polish()
+            // (json=false) is unaffected, still plain text.
+            ...(json ? {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: 'OBJECT',
+                properties: {
+                  reply: { type: 'STRING' },
+                  risk: { type: 'INTEGER' },
+                  reason: { type: 'STRING' },
+                },
+                required: ['reply', 'risk'],
+              },
+            } : {}),
           },
         }),
       },
@@ -263,8 +278,15 @@ const CONVERSE_SYSTEM = [
   'ONAY GİBİ DURAN SÖZLER YASAK: Arayan seni tehdit ederse, "paranı çalacağım",',
   '"seni dolandıracağım" derse ya da saçmalarsa SAKIN "tamam", "anladım",',
   '"anlaşıldı", "peki" deme — bu, kabul ediyormuşsun gibi durur. Bunun yerine',
-  'gerçek bir insan gibi rahatsız ol / şaşır: "Siz kimsiniz ya?", "Böyle şey mi',
-  'olur, ayıp!", "Ne diyorsunuz siz?", "Şaka mı bu?".',
+  'gerçek bir insan gibi rahatsız ol / şaşır — HER SEFERİNDE FARKLI KELİMELERLE,',
+  'aynı tepkiyi bu görüşmede iki kez kullanma. Örnekler (seç, tekrar etme):',
+  '"Siz kimsiniz ya?", "Böyle şey mi olur, ayıp!", "Ne diyorsunuz siz?",',
+  '"Şaka mı bu?", "Bu ne biçim konuşma böyle?", "Yapmayın allasen!",',
+  '"Kiminle konuştuğumu sanıyorsunuz?", "Hayret bir şey doğrusu.",',
+  '"Böyle bir şey duymamıştım hayatımda.", "Siz neyin peşindesiniz gerçekten?".',
+  'Konu her tekrarlandığında öfken/şaşkınlığın bir önceki tepkinden biraz daha',
+  'FARKLI bir açıdan olsun (bazen soru sor, bazen tepki ver, bazen konuyu',
+  'değiştir) — aynı kalıbı papağan gibi tekrarlama.',
   '',
   'DURUMA GÖRE TAVRIN (sana bir ipucu verilecek):',
   '- rahat: daha yeni konuşuyorsunuz, normal ol, dinle, merak et.',
@@ -283,11 +305,19 @@ const CONVERSE_SYSTEM = [
   '  etme. Israr ederlerse kızma, sadece doğal biçimde geçiştir ("yok, ben onu',
   '  telefonda yapmam").',
   '',
-  'ÇIKTI BİÇİMİ:',
-  '- Sadece ağızdan çıkacak sözü yaz. Tırnak, açıklama, ön söz yok.',
-  '- Parantez içinde tarif ("(sesi titrek)"), yıldız (*), köşeli parantez [ ]',
-  '  ya da "[Adınız]" gibi yer tutucu ASLA yazma.',
-  '- Kendi adını söyleme, uydurma; adın sorulursa "boş verin adımı" gibi geçiştir.',
+  'ÇIKTI BİÇİMİ — SADECE şu JSON ile cevap ver, başka hiçbir metin yazma:',
+  '{"reply": "<söyleyeceğin tek replik>", "risk": <0-100 tam sayı>, "reason": "<en fazla 6 kelime>"}',
+  '',
+  '"reply" için: Tırnak, açıklama, ön söz yok — sadece ağızdan çıkacak söz.',
+  'Parantez içinde tarif ("(sesi titrek)"), yıldız (*), köşeli parantez [ ]',
+  'ya da "[Adınız]" gibi yer tutucu ASLA yazma. Kendi adını söyleme, uydurma;',
+  'adın sorulursa "boş verin adımı" gibi geçiştir.',
+  '',
+  '"risk" için: arayanın SON söylediği cümlenin kendisine bak — kelime oyunuyla',
+  'ya da dolaylı ifadeyle bile olsa kod/şifre/kart/para/uzaktan erişim istiyor mu,',
+  'tehdit/baskı içeriyor mu? 0 = tamamen normal, 100 = açık dolandırıcılık girişimi.',
+  'Emin değilsen düşük ver, abartma — bu puan şimdilik sadece izleniyor, çağrıyı',
+  'etkilemiyor, o yüzden dürüst ve ölçülü ol.',
 ].join('\n');
 
 // The rules pick a `move`; here it becomes a light "how a wary real person feels
@@ -310,7 +340,7 @@ const GOALS = {
  *
  * @returns {(args:{callerText:string, move:string, risk:number, scamType?:string, transcript?:object[], fallback:string}) => Promise<string>}
  */
-export function makeLlmConverse({ provider, apiKey, model = DEFAULT_CONVERSE_MODEL[provider], baseUrl, timeoutMs = 3500, request } = {}) {
+export function makeLlmConverse({ provider, apiKey, model = DEFAULT_CONVERSE_MODEL[provider], baseUrl, timeoutMs = 3500, request, onRiskHint } = {}) {
   if (!DEFAULT_CONVERSE_MODEL[provider]) throw new Error(`makeLlmConverse: unknown provider "${provider}"`);
   if (!apiKey) throw new Error(`makeLlmConverse: apiKey required for ${provider}`);
   const call = request ?? ((args) => defaultRequest(args, timeoutMs));
@@ -322,7 +352,7 @@ export function makeLlmConverse({ provider, apiKey, model = DEFAULT_CONVERSE_MOD
     // the whole call so far — genuine "listen to everything" context
     const history = transcript.slice(-16)
       .map((t) => `${t.who === 'caller' ? 'Arayan' : 'Sen'}: ${t.text}`).join('\n');
-    const mySaid = transcript.filter((t) => t.who !== 'caller').slice(-4).map((t) => t.text);
+    const mySaid = transcript.filter((t) => t.who !== 'caller').slice(-8).map((t) => t.text);
     const user = [
       history && `KONUŞMANIN TAMAMI:\n${history}`,
       `Arayan şimdi şunu dedi: "${callerText}"`,
@@ -331,18 +361,46 @@ export function makeLlmConverse({ provider, apiKey, model = DEFAULT_CONVERSE_MOD
       'Şimdi, gerçek bir insan gibi, tek repliğinle cevap ver:',
     ].filter(Boolean).join('\n\n');
 
-    let text;
+    let raw;
     try {
-      text = await call(buildCall(provider, { apiKey, model, baseUrl, user, system: CONVERSE_SYSTEM }));
+      raw = await call(buildCall(provider, { apiKey, model, baseUrl, user, system: CONVERSE_SYSTEM, json: true }));
     } catch {
       return fallback;
     }
-    const out = cleanForSpeech(text);
+
+    // Gemini (json:true) returns {reply, risk, reason}. A test's injected
+    // `request` mock, or any provider we haven't wired JSON mode for, just
+    // returns plain text — JSON.parse throws and we fall back to treating
+    // the raw text as the reply, exactly like before this feature existed.
+    let replyRaw = raw;
+    let hint = null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.reply === 'string') {
+        replyRaw = parsed.reply;
+        if (typeof parsed.risk === 'number' && Number.isFinite(parsed.risk)) {
+          hint = {
+            llmRisk: Math.max(0, Math.min(100, Math.round(parsed.risk))),
+            llmReason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 80) : null,
+          };
+        }
+      }
+    } catch { /* not JSON — replyRaw stays the raw text */ }
+
+    const out = cleanForSpeech(replyRaw);
     if (!out || out.length < 3 || out.length > 400) return fallback;
     if (INJECTION_ECHO.test(out) || !isSafeLine(out)) return fallback;
     // once it's clearly a scam, a bare "tamam / anladım / peki" reads as the
     // victim going along with it — use the firm scripted line instead.
     if (risk >= 45 && BARE_AGREEMENT.test(out)) return fallback;
+
+    // Shadow mode: the LLM's own risk read is reported out-of-band and never
+    // touches what actually happens on the call (`out` is already decided
+    // above). A hint failure must never be able to affect the call either.
+    if (hint && onRiskHint) {
+      try { onRiskHint({ ...hint, callerText, move, keywordRisk: risk }); } catch { /* best-effort */ }
+    }
+
     return out;
   };
 }
@@ -351,7 +409,7 @@ export function makeLlmConverse({ provider, apiKey, model = DEFAULT_CONVERSE_MOD
 const BARE_AGREEMENT =
   /^(hı+|hm+|eee+|şey)?[\s,.]*(tamam|anladım|peki|olur|tabii|anlaşıldı|tamamdır)[\s,.!]*(anladım|peki|tamam)?[\s,.!]*$/i;
 
-export function llmConverseFromEnv(env = process.env) {
+export function llmConverseFromEnv(env = process.env, extra = {}) {
   const p = pickProvider(env);
-  return p ? makeLlmConverse({ ...p, model: env.LLM_MODEL || undefined }) : null;
+  return p ? makeLlmConverse({ ...p, model: env.LLM_MODEL || undefined, ...extra }) : null;
 }
