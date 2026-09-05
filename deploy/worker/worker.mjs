@@ -174,8 +174,8 @@ export default defineAgent({
     const callId = ctx.room.name.replace(/^guard-/, '');
     // the app puts the user's FCM token in room metadata when it starts the call
     const meta = safeJson(ctx.room.metadata) || {};
-    const fcmToken = meta.fcmToken;
-    const ttsTier = meta.ttsTier || 'top'; // 'free' | 'premium' | 'top' — app doesn't send this yet (see call_takeover_service.dart), defaulting everyone to the best voice for now per product decision; revisit once app-side tiering + cost tracking exist
+    let fcmToken = meta.fcmToken;
+    let ttsTier = meta.ttsTier; // 'free' | 'premium' | 'top' — comes from the guard_pending doc the app writes (claimed below); default applied after the claim
 
     console.log('[diag] waiting for caller');
     const caller = await waitForCaller(ctx);
@@ -202,6 +202,21 @@ export default defineAgent({
     // reportNumber()). One write per call, guarded by callerFlagged below.
     const callerNumberMatch = ctx.room.name.match(/^guard-_(\d+)_/);
     const callerNumber = callerNumberMatch ? callerNumberMatch[1] : null;
+
+    // The app can't put anything in the SIP room metadata (it just dials a
+    // number), so it drops a short-lived doc in Firestore keyed by the user's
+    // own number right before dialling. Claim it here so live risk + the duel
+    // transcript can be pushed back to that exact phone. No doc = works exactly
+    // as before (silent, no push).
+    if (callerNumber) {
+      const reg = await claimPendingRegistration(callerNumber).catch(() => null);
+      if (reg) {
+        fcmToken = reg.fcmToken || fcmToken;
+        ttsTier = reg.ttsTier || ttsTier;
+        console.log('[guard] claimed push registration for the calling phone');
+      }
+    }
+    ttsTier = ttsTier || 'top';
     let callerFlagged = false;
     async function flagCallerAsScam(signalIds = []) {
       if (callerFlagged || !callerNumber || !admin.apps.length) return;
@@ -288,6 +303,11 @@ export default defineAgent({
       callId,
       stt,
       paceMs,
+      // A real caller often pauses 7-10s to think (esp. when asked "who are
+      // you / why did you call"); the default 7s silence nudge fired on those
+      // pauses and read as "the AI isn't listening". Give it more room.
+      silenceMs: Number(process.env.GUARD_SILENCE_MS || 12000),
+      maxSilenceNudges: Number(process.env.GUARD_SILENCE_NUDGES || 3),
       locale: GUARD_LOCALE,
       overlay: lexiconOverlay,
       weightOverrides: guardWeights,
@@ -312,6 +332,9 @@ export default defineAgent({
       polish: polishWithConsent,
       onUtterance: (u) => {
         transcript.push({ who: u.who, text: u.text, ts: Date.now() });
+        pushToPhone(fcmToken, {
+          type: 'guard_transcript', callId, who: u.who, text: u.text,
+        }).catch(() => {});
       },
       onRisk: (r) => {
         if (r.band === 'high' || r.band === 'severe' || r.risk >= 60) {
@@ -397,6 +420,30 @@ cli.runApp({ agent: new URL(import.meta.url).pathname });
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 function safeJson(s) { try { return JSON.parse(s); } catch { return null; } }
+
+/** Normalise a phone number to digits only (drop +, spaces, leading 00). */
+function normalizeNumber(n) {
+  return String(n || '').replace(/[^\d]/g, '').replace(/^00/, '');
+}
+
+/**
+ * The app writes guard_pending/{normalisedUserNumber} = { fcmToken, ttsTier,
+ * at } just before dialling the guard number. Read it (fresh only) and delete
+ * it so a stale registration can't attach to a later unrelated call.
+ */
+async function claimPendingRegistration(callerNumber) {
+  if (!admin.apps.length) return null;
+  const key = normalizeNumber(callerNumber);
+  if (!key) return null;
+  const ref = admin.firestore().collection('guard_pending').doc(key);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+  const data = snap.data() || {};
+  ref.delete().catch(() => {});
+  const at = typeof data.at === 'number' ? data.at : (data.at?.toMillis?.() ?? 0);
+  if (at && Date.now() - at > 120000) return null;
+  return { fcmToken: data.fcmToken || null, ttsTier: data.ttsTier || null };
+}
 
 function waitForCaller(ctx) {
   return new Promise((resolve) => {
