@@ -175,7 +175,7 @@ export default defineAgent({
     // the app puts the user's FCM token in room metadata when it starts the call
     const meta = safeJson(ctx.room.metadata) || {};
     const fcmToken = meta.fcmToken;
-    const ttsTier = meta.ttsTier || 'free'; // 'free' | 'premium' | 'top' — set by the app when it starts the call
+    const ttsTier = meta.ttsTier || 'top'; // 'free' | 'premium' | 'top' — app doesn't send this yet (see call_takeover_service.dart), defaulting everyone to the best voice for now per product decision; revisit once app-side tiering + cost tracking exist
 
     console.log('[diag] waiting for caller');
     const caller = await waitForCaller(ctx);
