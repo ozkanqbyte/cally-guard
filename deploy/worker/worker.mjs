@@ -16,7 +16,7 @@ import { cli, defineAgent, JobContext } from '@livekit/agents';
 import { AudioFrame, AudioSource, AudioStream, LocalAudioTrack, TrackKind, TrackPublishOptions, TrackSource } from '@livekit/rtc-node';
 import admin from 'firebase-admin';
 import { readFileSync } from 'node:fs';
-import { writeFile, readFile, readdir, stat, unlink } from 'node:fs/promises';
+import { writeFile, readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { VoiceAgent } from '../../src/agent/voice-agent.mjs';
@@ -73,6 +73,7 @@ if (process.env.FCM_SERVICE_ACCOUNT_JSON) {
     credential: admin.credential.cert(
       JSON.parse(readFileSync(process.env.FCM_SERVICE_ACCOUNT_JSON, 'utf8')),
     ),
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || 'callypro-fcc43.firebasestorage.app',
   });
 }
 const pushToPhone = async (token, data) => {
@@ -159,6 +160,10 @@ if (RECORD_DIR) {
   cleanupOldRecordings();
   setInterval(cleanupOldRecordings, 6 * 60 * 60 * 1000).unref?.();
 }
+// Note: the Storage-side copy uploaded in onEnd below (guard_recordings/{callId}/…)
+// is bounded separately by a bucket lifecycle rule — see
+// deploy/lifecycle-guard-recordings.json, scoped to the guard_recordings/
+// prefix only so it never touches profile photos or other app data.
 
 // ── The agent ────────────────────────────────────────────────────────────────
 export default defineAgent({
