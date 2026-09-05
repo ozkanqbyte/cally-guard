@@ -75,7 +75,15 @@ export class VoiceAgent {
       this._clearSilenceTimer();
       this._busy = this._busy.then(() => this._finish('caller_hangup')).catch(() => {});
     });
-    await this._say(this._call.opening, 'greet');
+    // Chain the greeting into `_busy` itself (not a bare await) — the STT
+    // 'final' listener above is already live while this speaks, and if it
+    // fires early (a genuinely fast caller, or the mic picking up the AI's
+    // own voice as an echo) `_onCaller` must wait for the greeting's
+    // `tts.speak()` to actually finish first. Two concurrent captureFrame()
+    // calls on the same AudioSource throw an RtcError (InvalidState) — this
+    // is what caused that in a live call before this fix.
+    this._busy = this._say(this._call.opening, 'greet');
+    await this._busy;
     this._armSilenceTimer();
   }
 
