@@ -210,7 +210,7 @@ export default defineAgent({
         const doc = {
           reportCount: admin.firestore.FieldValue.increment(1),
           lastReported: admin.firestore.FieldValue.serverTimestamp(),
-          categories: admin.firestore.FieldValue.arrayUnion(['scam']),
+          categories: admin.firestore.FieldValue.arrayUnion('scam'),
           number: callerNumber,
         };
         // sub-type detail — which scam method(s) this caller used, so the
