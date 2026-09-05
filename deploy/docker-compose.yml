@@ -60,6 +60,7 @@ services:
     env_file: .env
     volumes:
       - ./firebase-service-account.json:/app/firebase-service-account.json:ro
+      - /root/guard/recordings:/root/guard/recordings
     environment:
       LIVEKIT_URL: ws://127.0.0.1:7880
       WHISPER_URL: http://127.0.0.1:8000
@@ -79,6 +80,7 @@ services:
     env_file: .env
     volumes:
       - ./firebase-service-account.json:/app/firebase-service-account.json:ro
+      - /root/guard/recordings:/root/guard/recordings
     environment:
       GUARD_API_URL: http://127.0.0.1:8080
     entrypoint: ["/bin/sh", "-c", "while true; do node jobs/ingest-reports.mjs || true; sleep 900; done"]
