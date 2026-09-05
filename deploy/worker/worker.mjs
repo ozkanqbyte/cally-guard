@@ -16,6 +16,8 @@ import { cli, defineAgent, JobContext } from '@livekit/agents';
 import { AudioSource, AudioStream } from '@livekit/rtc-node';
 import admin from 'firebase-admin';
 import { readFileSync } from 'node:fs';
+import { readdir, stat, unlink } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 
 import { VoiceAgent } from '../../src/agent/voice-agent.mjs';
 import { humanize } from '../../src/agent/humanize.mjs';
@@ -61,6 +63,7 @@ if (process.env.FCM_SERVICE_ACCOUNT_JSON) {
     credential: admin.credential.cert(
       JSON.parse(readFileSync(process.env.FCM_SERVICE_ACCOUNT_JSON, 'utf8')),
     ),
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || 'callypro-fcc43.firebasestorage.app',
   });
 }
 const pushToPhone = async (token, data) => {
@@ -102,6 +105,63 @@ async function refreshLexicon() {
 }
 await refreshLexicon();
 setInterval(refreshLexicon, 60 * 60 * 1000).unref?.();
+
+// ── Evidence clips: local + Firebase Storage, both bounded ─────────────────────
+// `CallRecorder` (../../src/agent/call-recorder.mjs) only ever writes a clip
+// when the call was armed (score/band crossed the guard bar) and
+// GUARD_RECORD_DIR is set — see that file for the legal/consent notes. What
+// happens here is purely "now that a clip exists locally, mirror it":
+//   1. upload it to Cloud Storage under guard_recordings/ (Admin SDK write —
+//      the client-side storage.rules for that path are read-only for admins,
+//      write:false for everyone else, matching that file's own comment).
+//   2. leave the local copy in place (fast on-box access for the worker/ops).
+// Both copies are time-bounded the same way, not kept forever:
+//   - the Storage copy is deleted by a bucket lifecycle rule (see
+//     deploy/lifecycle-guard-recordings.json — applied once via `gsutil
+//     lifecycle set`, not app code) scoped to the guard_recordings/ prefix
+//     only, so it never touches profile photos or other app data.
+//   - the local copy is swept by pruneLocalRecordings() below on the same
+//     schedule, so GUARD_RECORD_DIR can't grow without bound if a deploy is
+//     ever left running for months.
+const RECORD_MAX_AGE_DAYS = Number(process.env.GUARD_RECORD_MAX_AGE_DAYS || 30);
+
+async function uploadEvidenceClip(localPath, callId) {
+  if (!admin.apps.length) return null;
+  const dest = `guard_recordings/${basename(localPath)}`;
+  await admin.storage().bucket().upload(localPath, {
+    destination: dest,
+    metadata: {
+      contentType: 'audio/wav',
+      metadata: { callId: String(callId), capturedAt: String(Date.now()) },
+    },
+  });
+  return dest;
+}
+
+async function pruneLocalRecordings() {
+  const dir = process.env.GUARD_RECORD_DIR;
+  if (!dir) return;
+  const maxAgeMs = RECORD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+  try {
+    const names = await readdir(dir);
+    const now = Date.now();
+    for (const name of names) {
+      if (!name.endsWith('.wav')) continue;
+      const path = join(dir, name);
+      try {
+        const info = await stat(path);
+        if (now - info.mtimeMs > maxAgeMs) await unlink(path);
+      } catch {
+        // file vanished between readdir and stat/unlink, or a permission
+        // hiccup — never let housekeeping take down the worker.
+      }
+    }
+  } catch {
+    // GUARD_RECORD_DIR not mounted / not created yet — nothing to prune.
+  }
+}
+await pruneLocalRecordings();
+setInterval(pruneLocalRecordings, 24 * 60 * 60 * 1000).unref?.();
 
 // ── The agent ────────────────────────────────────────────────────────────────
 export default defineAgent({
@@ -173,7 +233,12 @@ export default defineAgent({
       },
       onEnd: async ({ reason, summary }) => {
         const clip = await recorder?.finish().catch(() => null);
-        if (clip) console.log(`[guard] evidence clip: ${clip}`);
+        if (clip) {
+          console.log(`[guard] evidence clip: ${clip}`);
+          uploadEvidenceClip(clip, callId)
+            .then((dest) => dest && console.log(`[guard] evidence clip mirrored to gs://.../${dest}`))
+            .catch((e) => console.warn(`[guard] evidence upload failed (kept locally only): ${e.message}`));
+        }
         await pushToPhone(fcmToken, { type: 'guard_summary', callId, reason, summary }).catch(() => {});
         await ctx.room.disconnect();
       },
