@@ -2,6 +2,9 @@
 torch==2.2.2
 torchaudio==2.2.2
 speechbrain==1.0.0
+# speechbrain 1.0.0 still calls hf_hub_download(use_auth_token=...), removed in
+# huggingface_hub >=0.23 — pin to a version that still has it.
+huggingface_hub==0.20.3
 firebase-admin==6.5.0
 fastapi==0.110.1
 uvicorn[standard]==0.29.0
