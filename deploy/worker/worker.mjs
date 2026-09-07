@@ -407,6 +407,34 @@ export default defineAgent({
             }
           }
         }
+        // voice fingerprint — have we caught this voice before? (best-effort,
+        // short timeout, never blocks teardown). The voiceprint service also
+        // backfills every recording on its own; this is just for the fast
+        // "known voice" push the user sees on the call-end screen.
+        if (admin.apps.length && clip) {
+          try {
+            const vp = await Promise.race([
+              fetch('http://127.0.0.1:8090/match', {
+                method: 'POST',
+                headers: { 'content-type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                  gcs_path: `guard_recordings/${callId}/audio.wav`,
+                }),
+              }).then((r) => r.json()),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('vp timeout')), 5000)),
+            ]);
+            if (vp && vp.known) {
+              await pushToPhone(fcmToken, {
+                type: 'guard_voice_match',
+                callId,
+                score: String(vp.bestScore ?? ''),
+                clusterSize: String(vp.clusterSize ?? 0),
+              }).catch(() => {});
+            }
+          } catch (e) {
+            console.warn('[guard] voiceprint match skipped:', e.message);
+          }
+        }
         await pushToPhone(fcmToken, { type: 'guard_summary', callId, reason, summary }).catch(() => {});
         await ctx.room.disconnect();
       },

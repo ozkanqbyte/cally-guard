@@ -67,6 +67,21 @@ services:
       PIPER_URL: http://127.0.0.1:5000
     depends_on: [livekit, whisper, piper]
 
+  # voice-fingerprint service — turns recorded scam calls into speaker
+  # embeddings, clusters "same voice" across numbers, and answers the worker's
+  # live "known voice?" query on /match. CPU-only, ~600 MB RAM.
+  voiceprint:
+    build:
+      context: ./voiceprint
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports: ["127.0.0.1:8090:8090"]
+    env_file: .env
+    environment:
+      FIREBASE_STORAGE_BUCKET: callypro-fcc43.firebasestorage.app
+    volumes:
+      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
+
   # guard_reports (phone) ─▶ learning review queue. Every 15 min. Needs the
   # guard API (server.mjs) reachable at GUARD_API_URL and a Firebase service
   # account. Nothing trains automatically — an admin still approves each example
