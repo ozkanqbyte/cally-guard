@@ -29,6 +29,7 @@ Privacy: only the embedding is stored long-term. The raw WAV keeps its existing
 
 import io
 import os
+import re
 import threading
 import time
 import uuid
@@ -54,6 +55,7 @@ BUCKET = os.environ.get(
 VP_JOIN = float(os.environ.get("VP_JOIN", "0.55"))   # cosine to treat as same voice
 VP_MATCH = float(os.environ.get("VP_MATCH", "0.45"))  # cosine worth showing at all
 VP_MIN_CLUSTER_PUSH = int(os.environ.get("VP_MIN_CLUSTER_PUSH", "2"))  # size to warn the user
+VP_FLAG_MIN_SIZE = int(os.environ.get("VP_FLAG_MIN_SIZE", "3"))  # cluster size to flag its numbers at ring time
 VP_MAX_SEC = int(os.environ.get("VP_MAX_SEC", "25"))
 VP_POLL_SEC = int(os.environ.get("VP_POLL_SEC", "60"))
 TARGET_SR = 16000
@@ -158,8 +160,6 @@ def _new_cluster_id() -> str:
 
 def _number_from_call_id(call_id: str) -> str:
     # guard-_905072406390_WB6qfjAT5FqL-3258560  ->  905072406390
-    import re
-
     m = re.search(r"_(\d{7,})_", call_id)
     return m.group(1) if m else ""
 
@@ -531,6 +531,61 @@ def process_block_requests() -> None:
             print(f"[vp] block request {doc.id} FAILED: {e}")
 
 
+# ── ring-time number flags (passive, no audio, no handoff) ──────────────────
+def sync_number_flags() -> None:
+    """Mirror every scam-voice cluster's phone numbers into
+    guard_number_flags/{digits} so the app can warn at ring time with one cheap
+    Firestore read — no audio, no AI-Guard handoff needed. A number is flagged
+    when its voice cluster is operator-verified OR spans >= VP_FLAG_MIN_SIZE
+    recorded scam calls. Stale flags (cluster shrank / unverified / deleted) are
+    removed so a number never stays flagged forever."""
+    try:
+        clusters = list(db.collection("guard_voice_clusters").stream())
+    except Exception as e:  # noqa: BLE001
+        print("[vp] number-flag sync: cluster read failed:", e)
+        return
+
+    want: dict[str, dict] = {}
+    for d in clusters:
+        c = d.to_dict() or {}
+        size = int(c.get("size", 0))
+        verified = bool(c.get("verified"))
+        if not (verified or size >= VP_FLAG_MIN_SIZE):
+            continue
+        for num in c.get("numbers", []):
+            num = re.sub(r"\D", "", str(num))
+            if len(num) < 7:
+                continue
+            cur = want.get(num)
+            # if a number is in several clusters, keep the strongest (verified,
+            # then biggest).
+            if cur and (cur["verified"], cur["clusterSize"]) >= (verified, size):
+                continue
+            want[num] = {
+                "number": num,
+                "voiceClusterId": d.id,
+                "verified": verified,
+                "clusterSize": size,
+                "scamTypes": sorted(c.get("scamTypes", []))[:6],
+                "kind": "scam_voice",
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }
+
+    col = db.collection("guard_number_flags")
+    try:
+        have = {d.id for d in col.stream()}
+    except Exception:  # noqa: BLE001
+        have = set()
+
+    for num, body in want.items():
+        col.document(num).set(body)
+    stale = have - set(want.keys())
+    for num in stale:
+        col.document(num).delete()
+    if want or stale:
+        print(f"[vp] number flags: {len(want)} active, {len(stale)} cleared")
+
+
 # ── backfill ────────────────────────────────────────────────────────────────
 def process_recording(doc) -> None:
     call_id = doc.id
@@ -616,6 +671,7 @@ def backfill_loop() -> None:
             if process_ops():
                 load_index()
             process_block_requests()
+            sync_number_flags()
             for doc in db.collection("guard_recordings").limit(300).stream():
                 d = doc.to_dict() or {}
                 if d.get("voiceprintDone"):
@@ -732,9 +788,10 @@ def reindex():
 
 @app.post("/ops/run")
 def ops_run():
-    """Force a curation + block-request pass now instead of waiting for the poll."""
+    """Force a curation + block-request + number-flag pass now."""
     changed = process_ops()
     if changed:
         load_index()
     process_block_requests()
+    sync_number_flags()
     return {"ok": True, "changed": changed, "prints": len(_ids)}
