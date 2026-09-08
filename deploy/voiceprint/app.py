@@ -732,8 +732,9 @@ def reindex():
 
 @app.post("/ops/run")
 def ops_run():
-    """Force a curation pass now instead of waiting for the poll."""
+    """Force a curation + block-request pass now instead of waiting for the poll."""
     changed = process_ops()
     if changed:
         load_index()
+    process_block_requests()
     return {"ok": True, "changed": changed, "prints": len(_ids)}
