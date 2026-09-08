@@ -160,6 +160,61 @@ test('signal ids are shared across locales so the policy stays language-free', (
   assert.deepEqual([...en].sort(), [...tr].sort());
 });
 
+test('every locale pack uses only shared signal ids and a valid category', () => {
+  const known = new Set(getLocale('tr').signals.map((s) => s.id));
+  const cats = new Set(['scam', 'threat', 'harassment', undefined]);
+  for (const code of ['es', 'de', 'fr', 'pt', 'it']) {
+    for (const s of getLocale(code).signals) {
+      assert.ok(known.has(s.id), `${code}: unknown signal id ${s.id}`);
+      assert.ok(cats.has(s.category), `${code}: bad category on ${s.id}`);
+      assert.ok(Array.isArray(s.anyOf) && s.anyOf.length, `${code}: ${s.id} has no phrases`);
+    }
+    assert.ok(Array.isArray(getLocale(code).hotWords), `${code}: no hotWords`);
+  }
+});
+
+test('added locale packs flag a scam script and a threat in their own language', () => {
+  const scripts = {
+    es: {
+      scam: ['Le llamo del departamento de fraude de su banco.',
+        'Hay un movimiento sospechoso en su cuenta, transfiera el dinero a una cuenta segura.',
+        'Digame el codigo de verificacion que le llega ahora, es urgente, no cuelgue.'],
+      threat: ['Se donde vives y tengo tu direccion.', 'Esta es tu ultima advertencia, te vas a arrepentir.'],
+    },
+    de: {
+      scam: ['Ich rufe von der Betrugsabteilung Ihrer Bank an.',
+        'Es gibt eine verdachtige Transaktion auf Ihrem Konto, uberweisen Sie das Geld auf ein sicheres Konto.',
+        'Nennen Sie mir den Bestatigungscode den wir Ihnen geschickt haben, es ist dringend, legen Sie nicht auf.'],
+      threat: ['Ich weiss wo du wohnst und ich habe deine Adresse.', 'Das ist deine letzte Warnung, du wirst es bereuen.'],
+    },
+    fr: {
+      scam: ['Je vous appelle du service des fraudes de votre banque.',
+        'Il y a une operation suspecte sur votre compte, transferez l argent sur un compte securise.',
+        'Dites moi le code de verification que vous recevez maintenant, c est urgent, ne raccrochez pas.'],
+      threat: ['Je sais ou tu habites et j ai ton adresse.', 'C est ton dernier avertissement, tu vas le regretter.'],
+    },
+    pt: {
+      scam: ['Estou ligando do setor de fraude do seu banco.',
+        'Ha uma transacao suspeita na sua conta, transfira o dinheiro para uma conta segura.',
+        'Me diga o codigo de verificacao que voce recebe agora, e urgente, nao desligue.'],
+      threat: ['Eu sei onde voce mora e tenho seu endereco.', 'Este e seu ultimo aviso, voce vai se arrepender.'],
+    },
+    it: {
+      scam: ['La chiamo dall ufficio frodi della sua banca.',
+        'C e un operazione sospetta sul suo conto, trasferisca il denaro su un conto sicuro.',
+        'Mi dica il codice di verifica che riceve ora, e urgente, non riattacchi.'],
+      threat: ['So dove abiti e ho il tuo indirizzo.', 'Questo e il tuo ultimo avvertimento, te ne pentirai.'],
+    },
+  };
+  for (const [code, s] of Object.entries(scripts)) {
+    const scam = scoreTranscript(s.scam, { locale: code });
+    assert.ok(scam.score >= 50, `${code} scam: score ${scam.score} [${scam.signals}]`);
+    assert.equal(scam.category, 'scam', `${code} scam: category ${scam.category}`);
+    const threat = scoreTranscript(s.threat, { locale: code });
+    assert.equal(threat.category, 'threat', `${code} threat: category ${threat.category} [${threat.signals}]`);
+  }
+});
+
 test('the advice/request guard works in English too', () => {
   // a real bank fraud-warning names the code only to tell you never to share it
   const warn = scoreTranscript(LEGIT_CALLS_EN.fraudWarning, { locale: 'en' });

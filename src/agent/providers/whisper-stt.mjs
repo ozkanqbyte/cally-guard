@@ -29,8 +29,12 @@ export class WhisperStt {
     this._model = model;
     this._language = language;
     // Whisper takes a free-text "initial prompt" — priming it with the likely
-    // vocabulary measurably cuts errors on those exact words.
-    this._prompt = `Dolandırıcılık çağrısı. Geçebilecek terimler: ${hotWords.join(', ')}.`;
+    // vocabulary measurably cuts errors on those exact words. The lead-in is
+    // language-matched so a non-Turkish call isn't biased toward Turkish.
+    const leadIn = language === 'tr'
+      ? 'Dolandırıcılık çağrısı. Geçebilecek terimler: '
+      : 'Scam / fraud phone call. Likely terms: ';
+    this._prompt = `${leadIn}${hotWords.join(', ')}.`;
     this._handlers = { final: [], hangup: [], partial: [] };
     /** @type {number[]} */ this._buf = [];
     this._silentMs = 0;

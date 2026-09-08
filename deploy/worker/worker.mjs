@@ -33,11 +33,14 @@ import { ElevenLabsTts } from '../../src/agent/providers/elevenlabs-tts.mjs';
 // ── provider pick (env-driven) ───────────────────────────────────────────────
 // STT_PROVIDER = whisper (default, free self-host) | deepgram
 // TTS_PROVIDER = piper   (default, free self-host) | elevenlabs | cartesia
-function makeStt() {
+function makeStt(locale = GUARD_LOCALE) {
+  const lang = String(locale || GUARD_LOCALE).toLowerCase().slice(0, 2);
   if (process.env.STT_PROVIDER === 'deepgram') {
-    return new DeepgramStt({ apiKey: process.env.DEEPGRAM_API_KEY, endpointingMs: 600 });
+    return new DeepgramStt({
+      apiKey: process.env.DEEPGRAM_API_KEY, endpointingMs: 600, language: lang,
+    });
   }
-  return new WhisperStt({ baseUrl: process.env.WHISPER_URL });
+  return new WhisperStt({ baseUrl: process.env.WHISPER_URL, language: lang });
 }
 // TTS is picked per-call by the caller's plan tier (room.metadata.ttsTier),
 // not a single global env var — free/default users get the self-hosted, $0
@@ -177,13 +180,32 @@ export default defineAgent({
     let fcmToken = meta.fcmToken;
     let ttsTier = meta.ttsTier; // 'free' | 'premium' | 'top' — comes from the guard_pending doc the app writes (claimed below); default applied after the claim
     let userUid = null; // Firebase Auth uid of the phone owner — for the personal voice-block check
+    let userLocale = null; // 2-letter locale the phone owner runs the app in — picks the detection pack + STT language
+
+    // Derive the caller's own number from the room name and claim the pending
+    // registration BEFORE building the STT, so it can be created in the right
+    // language. `guard-_<callerNumber>_<rand>`.
+    const callerNumberMatch = ctx.room.name.match(/^guard-_(\d+)_/);
+    const callerNumber = callerNumberMatch ? callerNumberMatch[1] : null;
+    if (callerNumber) {
+      const reg = await claimPendingRegistration(callerNumber).catch(() => null);
+      if (reg) {
+        fcmToken = reg.fcmToken || fcmToken;
+        ttsTier = reg.ttsTier || ttsTier;
+        userUid = reg.uid || null;
+        userLocale = (reg.locale || '').toLowerCase().slice(0, 2) || null;
+        console.log(`[guard] claimed push registration for the calling phone (locale=${userLocale || 'default'})`);
+      }
+    }
+    ttsTier = ttsTier || 'top';
+    const callLocale = userLocale || GUARD_LOCALE;
 
     console.log('[diag] waiting for caller');
     const caller = await waitForCaller(ctx);
     console.log('[diag] got caller track');
     const pcmIn = pcmSourceFrom(new AudioStream(caller, 16000, 1));
 
-    const stt = makeStt();
+    const stt = makeStt(callLocale);
     console.log('[diag] stt made');
     stt.attach(pcmIn);
     console.log('[diag] stt attached');
@@ -196,29 +218,11 @@ export default defineAgent({
     if (recorder) pcmIn.on('data', (buf) => recorder.write(buf));
     const transcript = [];
 
-    // Community protection: once this call is clearly a scam, flag the
-    // caller's own number in the SAME Firestore doc (`spam_numbers/{number}`)
-    // the phone app's on-device spam checker already reads — merged in, same
-    // schema the app's own community-report flow writes (see spam_service.dart
-    // reportNumber()). One write per call, guarded by callerFlagged below.
-    const callerNumberMatch = ctx.room.name.match(/^guard-_(\d+)_/);
-    const callerNumber = callerNumberMatch ? callerNumberMatch[1] : null;
-
-    // The app can't put anything in the SIP room metadata (it just dials a
-    // number), so it drops a short-lived doc in Firestore keyed by the user's
-    // own number right before dialling. Claim it here so live risk + the duel
-    // transcript can be pushed back to that exact phone. No doc = works exactly
-    // as before (silent, no push).
-    if (callerNumber) {
-      const reg = await claimPendingRegistration(callerNumber).catch(() => null);
-      if (reg) {
-        fcmToken = reg.fcmToken || fcmToken;
-        ttsTier = reg.ttsTier || ttsTier;
-        userUid = reg.uid || null;
-        console.log('[guard] claimed push registration for the calling phone');
-      }
-    }
-    ttsTier = ttsTier || 'top';
+    // Community protection: once this call is clearly a scam, flag the caller's
+    // own number in the SAME Firestore doc (`spam_numbers/{number}`) the phone
+    // app's on-device spam checker already reads. One write per call, guarded by
+    // callerFlagged below. (`callerNumber` + the pending-registration claim are
+    // resolved above, before the STT is built, so it can pick the right locale.)
     let callerFlagged = false;
     async function flagCallerAsScam(signalIds = []) {
       if (callerFlagged || !callerNumber || !admin.apps.length) return;
@@ -310,10 +314,12 @@ export default defineAgent({
       // pauses and read as "the AI isn't listening". Give it more room.
       silenceMs: Number(process.env.GUARD_SILENCE_MS || 12000),
       maxSilenceNudges: Number(process.env.GUARD_SILENCE_NUDGES || 3),
-      locale: GUARD_LOCALE,
-      overlay: lexiconOverlay,
-      weightOverrides: guardWeights,
-      thresholds: guardThresholds,
+      locale: callLocale,
+      // the admin lexicon / weight / threshold overrides are loaded once for
+      // GUARD_LOCALE — only apply them when this call is in that same language.
+      overlay: callLocale === GUARD_LOCALE ? lexiconOverlay : undefined,
+      weightOverrides: callLocale === GUARD_LOCALE ? guardWeights : undefined,
+      thresholds: callLocale === GUARD_LOCALE ? guardThresholds : undefined,
       tts: {
         speak: async (text) => {
           console.log('[diag] tts.speak start:', JSON.stringify(text).slice(0, 60));
