@@ -52,7 +52,14 @@ SA_PATH = os.environ.get("FIREBASE_SA", "/app/firebase-service-account.json")
 BUCKET = os.environ.get(
     "FIREBASE_STORAGE_BUCKET", "callypro-fcc43.firebasestorage.app"
 )
-VP_JOIN = float(os.environ.get("VP_JOIN", "0.55"))   # cosine to treat as same voice
+# Thresholds calibrated on 60-speaker Common Voice TR, telephone-degraded, ~12s
+# samples (sim/voiceprint-eval.mjs): EER 4.0% @ cos 0.45; 0.1% false-accept @
+# 0.67. Community cluster-join is kept stricter than the personal block because
+# a wrong *shared* merge can taint an innocent number; a personal block is the
+# user's own low-stakes call. Real scam calls run 1-2 min (vs 12s here) so the
+# live numbers are better. Both are live-tunable via guard_config/voiceprint.
+VP_JOIN = float(os.environ.get("VP_JOIN", "0.60"))   # cosine to join a community cluster
+VP_PERSONAL_JOIN = float(os.environ.get("VP_PERSONAL_JOIN", "0.52"))  # cosine for a personal-block hit
 VP_MATCH = float(os.environ.get("VP_MATCH", "0.45"))  # cosine worth showing at all
 VP_MIN_CLUSTER_PUSH = int(os.environ.get("VP_MIN_CLUSTER_PUSH", "2"))  # size to warn the user
 VP_FLAG_MIN_SIZE = int(os.environ.get("VP_FLAG_MIN_SIZE", "3"))  # cluster size to flag its numbers at ring time
@@ -168,7 +175,7 @@ def _number_from_call_id(call_id: str) -> str:
 def _load_config() -> None:
     """Pull admin-tuned thresholds from guard_config/voiceprint. Values are
     range-checked; anything missing / silly keeps the current value."""
-    global VP_JOIN, VP_MATCH, VP_MIN_CLUSTER_PUSH
+    global VP_JOIN, VP_PERSONAL_JOIN, VP_MATCH, VP_MIN_CLUSTER_PUSH
     try:
         snap = db.collection("guard_config").document("voiceprint").get()
     except Exception as e:  # noqa: BLE001
@@ -177,9 +184,11 @@ def _load_config() -> None:
     if not snap.exists:
         return
     c = snap.to_dict() or {}
-    j, m, mc = c.get("join"), c.get("match"), c.get("minClusterForPush")
+    j, pj, m, mc = c.get("join"), c.get("personalJoin"), c.get("match"), c.get("minClusterForPush")
     if isinstance(j, (int, float)) and 0.30 <= float(j) <= 0.90:
         VP_JOIN = float(j)
+    if isinstance(pj, (int, float)) and 0.30 <= float(pj) <= 0.90:
+        VP_PERSONAL_JOIN = float(pj)
     if isinstance(m, (int, float)) and 0.25 <= float(m) <= 0.90:
         VP_MATCH = float(m)
     VP_MATCH = min(VP_MATCH, VP_JOIN)
@@ -474,7 +483,7 @@ def match_personal_block(uid: str, vec: np.ndarray):
     sims = mat @ vec
     i = int(np.argmax(sims))
     score = float(sims[i])
-    if score < VP_JOIN:
+    if score < VP_PERSONAL_JOIN:
         return None
     return {
         "matched": True,
@@ -707,6 +716,7 @@ def health():
         "prints": len(_ids),
         "clusters": len(set(_cluster_of.values())),
         "join": VP_JOIN,
+        "personalJoin": VP_PERSONAL_JOIN,
         "match": VP_MATCH,
         "minClusterPush": VP_MIN_CLUSTER_PUSH,
     }
@@ -714,7 +724,12 @@ def health():
 
 @app.get("/config")
 def get_config():
-    return {"join": VP_JOIN, "match": VP_MATCH, "minClusterForPush": VP_MIN_CLUSTER_PUSH}
+    return {
+        "join": VP_JOIN,
+        "personalJoin": VP_PERSONAL_JOIN,
+        "match": VP_MATCH,
+        "minClusterForPush": VP_MIN_CLUSTER_PUSH,
+    }
 
 
 @app.post("/config/reload")
