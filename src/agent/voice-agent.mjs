@@ -17,10 +17,10 @@ import { identityPolish } from './adapters.mjs';
  * @property {string} callId
  * @property {{on:(e:string,h:Function)=>any}} stt
  * @property {{speak:(t:string)=>Promise<any>}} tts
- * @property {(safeLine:string, ctx:{band:string,transcript:object[],callerText?:string,move?:string,risk?:number,reasons?:object[]})=>(string|Promise<string>)} [polish]
+ * @property {(safeLine:string, ctx:{band:string,transcript:object[],callerText?:string,move?:string,risk?:number,category?:string,reasons?:object[]})=>(string|Promise<string>)} [polish]
  *           rephrases the vetted line; ctx carries the move + risk so a
  *           conversational adapter (see `makeLlmConverse`) can be wired in here.
- * @property {(risk:{risk:number,band:string,reasons:object[]})=>void} [onRisk]
+ * @property {(risk:{risk:number,band:string,category?:string,reasons:object[]})=>void} [onRisk]
  * @property {(evt:{who:string,text:string})=>void} [onUtterance]
  * @property {(result:{reason:string,summary:object})=>void} [onEnd]
  * @property {'inbound'|'joinMidCall'} [mode]  'joinMidCall' = conferenced into an
@@ -97,10 +97,13 @@ export class VoiceAgent {
     this.onUtterance?.({ who: 'caller', text });
 
     const turn = this._call.callerSaid(text);
-    this.onRisk?.({ risk: turn.risk, band: turn.band, reasons: turn.reasons });
+    this.onRisk?.({
+      risk: turn.risk, band: turn.band, category: turn.category, reasons: turn.reasons,
+    });
 
     await this._say(turn.reply, turn.band, {
-      callerText: text, move: turn.move, risk: turn.risk, reasons: turn.reasons,
+      callerText: text, move: turn.move, risk: turn.risk,
+      category: turn.category, reasons: turn.reasons,
     });
 
     if (turn.action === 'end') {

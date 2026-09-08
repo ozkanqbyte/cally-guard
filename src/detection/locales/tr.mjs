@@ -4,7 +4,10 @@
  * A locale pack is pure data. `detector.mjs` folds and compiles it. Adding a
  * country = adding one of these files, never touching the engine.
  *
- *   signals[]         { id, label, severity, weight, guardAgainstAdvice?, anyOf[][] }
+ *   signals[]         { id, label, severity, weight, category?, guardAgainstAdvice?, anyOf[][] }
+ *                     category defaults to 'scam'; 'threat' / 'harassment' mark
+ *                     the non-fraud abuse signals (the engine reports the
+ *                     dominant category so the app can say "tehdit" not "dolandırıcılık").
  *   benignMarkers[]   phrases a *legitimate* caller uses (halve a borderline score)
  *   adviceMarkers[]   "never share your code" — protective advice, not a request
  *   explicitRequest[] "read me the code" — always beats adviceMarkers
@@ -286,6 +289,75 @@ export const signals = [
       ['işe alındınız', 'ücret'], ['evrak masrafı yatır'],
       ['malzeme ücreti yatır'], ['kontenjan ücreti'], ['staj ücreti öde'],
       ['garantili iş, önce'],
+    ],
+  },
+
+  // ── non-fraud abuse ──────────────────────────────────────────────────────
+  // These are not "how likely is this a scam" — they're "this call is abusive".
+  // High weights + the threat bonus in detector._compute() mean one clear line
+  // is enough to arm recording so the user has evidence.
+  {
+    id: 'threat_intimidation',
+    label: 'Tehdit / gözdağı',
+    severity: 'high',
+    weight: 34,
+    category: 'threat',
+    anyOf: [
+      ['seni bulurum'], ['seni bulacağım'], ['adresini biliyorum'],
+      ['nerede oturduğunu biliyorum'], ['evini biliyorum'], ['pişman olacaksın'],
+      ['pişman edeceğim'], ['canına okurum'], ['canını yakarım'],
+      ['gününü göreceksin'], ['seni mahvederim'], ['seni bitiririm'],
+      ['ailene zarar'], ['çocuğuna zarar'], ['kafana sıkarım'],
+      ['ölmek mi istiyorsun'], ['seni gebertir'], ['leşini sererim'],
+      ['bacaklarını kırarım'], ['üstüne adam gönderirim'], ['adam göndereceğim'],
+      ['dört köşe olursun'], ['tehdit ediyorum'], ['son uyarım'],
+    ],
+  },
+  {
+    id: 'sextortion_blackmail',
+    label: 'Şantaj / özel görüntü tehdidi',
+    severity: 'high',
+    weight: 38,
+    category: 'threat',
+    anyOf: [
+      ['görüntülerini yayınlarım'], ['görüntülerin elimde'], ['fotoğrafların elimde'],
+      ['videoyu herkese'], ['videonu yayarım'], ['ifşa ederim'], ['ifşa edeceğim'],
+      ['herkese gönderirim'], ['ailene gönderirim'], ['eşine gönderirim'],
+      ['patronuna gönderirim'], ['rezil ederim'], ['ekran görüntüsü aldım'],
+      ['kamerana eriştim'], ['telefonunu hackledim'], ['para göndermezsen', 'yayın'],
+      ['ödemezsen', 'ifşa'], ['bitcoin', 'yoksa'], ['kripto', 'yoksa ifşa'],
+    ],
+  },
+  {
+    id: 'harassment_abuse',
+    label: 'Taciz / hakaret / ısrarlı rahatsız etme',
+    severity: 'high',
+    weight: 28,
+    category: 'harassment',
+    anyOf: [
+      ['seni rahat bırakmayacağım'], ['seni aramaya devam edeceğim'],
+      ['istediğim kadar ararım'], ['engelle beni yine ararım'],
+      ['numaramı değiştirir yine ararım'], ['peşini bırakmam'],
+      ['her gün arayacağım'], ['gece gündüz ararım'],
+      ['sürekli arayacağım'], ['defalarca aradım daha da ararım'],
+      ['seni takip ediyorum'], ['nereye gitsen'], ['seni izliyorum'],
+      ['orospu'], ['şerefsiz'], ['sürtük'], ['piç'], ['aşağılık'],
+      ['sana küfür'], ['hakaret etmek için aradım'],
+    ],
+  },
+  {
+    id: 'debt_collection_abuse',
+    label: 'Yasadışı borç tahsilat baskısı',
+    severity: 'medium',
+    weight: 22,
+    category: 'harassment',
+    anyOf: [
+      ['borcunu ödemezsen', 'işyerini arar'], ['patronunu ararım'],
+      ['iş yerini ararım'], ['komşularını ararım'], ['akrabalarını ararım'],
+      ['tüm rehberini ararım'], ['herkese borçlu olduğunu'],
+      ['evine icra', 'bugün'], ['kapına dayanırım'], ['eşyalarına el koyarım'],
+      ['gece yarısı arıyorum çünkü'], ['istediğim saatte ararım'],
+      ['borç yüzünden', 'rezil'], ['tahsilat için ne gerekiyorsa'],
     ],
   },
 ];

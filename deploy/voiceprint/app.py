@@ -444,6 +444,93 @@ def process_ops() -> bool:
     return changed
 
 
+# ── personal voice blocks (per-user, private) ───────────────────────────────
+def _block_vecs(uid: str):
+    """(ids, matrix, meta) for one user's private block list — small, no cache."""
+    ids, rows, meta = [], [], []
+    col = db.collection("guard_voice_blocks").document(uid).collection("voices")
+    for d in col.stream():
+        v = (d.to_dict() or {}).get("vec")
+        if not v:
+            continue
+        ids.append(d.id)
+        rows.append(np.asarray(v, dtype=np.float32))
+        meta.append(d.to_dict() or {})
+    mat = np.vstack(rows) if rows else np.zeros((0, EMB_DIM), np.float32)
+    return ids, mat, meta
+
+
+def match_personal_block(uid: str, vec: np.ndarray):
+    """Does this live caller match a voice the user personally blocked?"""
+    if not uid:
+        return None
+    try:
+        ids, mat, meta = _block_vecs(uid)
+    except Exception as e:  # noqa: BLE001
+        print("[vp] block list read failed:", e)
+        return None
+    if mat.shape[0] == 0:
+        return None
+    sims = mat @ vec
+    i = int(np.argmax(sims))
+    score = float(sims[i])
+    if score < VP_JOIN:
+        return None
+    return {
+        "matched": True,
+        "blockId": ids[i],
+        "label": meta[i].get("label") or "",
+        "score": round(score, 3),
+    }
+
+
+def process_block_requests() -> None:
+    try:
+        docs = list(db.collection("guard_block_requests").limit(200).stream())
+    except Exception as e:  # noqa: BLE001
+        print("[vp] block requests list failed:", e)
+        return
+    for doc in docs:
+        d = doc.to_dict() or {}
+        if d.get("status") != "pending":
+            continue
+        ref = db.collection("guard_block_requests").document(doc.id)
+        uid = str(d.get("uid") or "")
+        call_id = str(d.get("callId") or "")
+        try:
+            if not uid or not call_id:
+                raise ValueError("missing uid / callId")
+            path = f"guard_recordings/{call_id}/audio.wav"
+            blob = bucket.blob(path)
+            if not blob.exists():
+                ref.set({"status": "no_recording", "doneAt": firestore.SERVER_TIMESTAMP},
+                        merge=True)
+                continue
+            vec = embed_wav_bytes(blob.download_as_bytes())
+            number = _number_from_call_id(call_id)
+            db.collection("guard_voice_blocks").document(uid).collection("voices").add({
+                "vec": vec.tolist(),
+                "dim": int(vec.shape[0]),
+                "label": d.get("label") or "",
+                "note": d.get("note") or "",
+                "sourceCallId": call_id,
+                "number": number,
+                "seenNumbers": [number] if number else [],
+                "addedAt": firestore.SERVER_TIMESTAMP,
+                "lastMatchedAt": None,
+            })
+            db.collection("guard_voice_blocks").document(uid).set(
+                {"count": firestore.Increment(1), "updatedAt": firestore.SERVER_TIMESTAMP},
+                merge=True,
+            )
+            ref.set({"status": "done", "doneAt": firestore.SERVER_TIMESTAMP}, merge=True)
+            print(f"[vp] blocked voice for {uid[:8]}… from call {call_id}")
+        except Exception as e:  # noqa: BLE001
+            ref.set({"status": "error", "doneAt": firestore.SERVER_TIMESTAMP,
+                     "error": str(e)[:300]}, merge=True)
+            print(f"[vp] block request {doc.id} FAILED: {e}")
+
+
 # ── backfill ────────────────────────────────────────────────────────────────
 def process_recording(doc) -> None:
     call_id = doc.id
@@ -528,6 +615,7 @@ def backfill_loop() -> None:
             _load_config()
             if process_ops():
                 load_index()
+            process_block_requests()
             for doc in db.collection("guard_recordings").limit(300).stream():
                 d = doc.to_dict() or {}
                 if d.get("voiceprintDone"):
@@ -583,6 +671,7 @@ def config_reload():
 async def match_ep(
     file: Optional[UploadFile] = File(default=None),
     gcs_path: Optional[str] = Form(default=None),
+    user_key: Optional[str] = Form(default=None),
 ):
     try:
         if gcs_path:
@@ -593,6 +682,7 @@ async def match_ep(
             return JSONResponse({"error": "no audio"}, status_code=400)
 
         vec = embed_wav_bytes(raw)
+        personal_block = match_personal_block((user_key or "").strip(), vec)
         m = match(vec)
         strong = [x for x in m if x[1] >= VP_MATCH]
         known = bool(strong and strong[0][1] >= VP_JOIN)
@@ -611,7 +701,11 @@ async def match_ep(
 
         # what the user actually gets warned about: a confident match AND either
         # an admin-verified voice or a voice seen in >= N recorded scam calls.
-        push = bool(known and (verified or cluster_size >= VP_MIN_CLUSTER_PUSH))
+        # A personal-block hit always warns — it's the user's own decision.
+        push = bool(
+            (known and (verified or cluster_size >= VP_MIN_CLUSTER_PUSH))
+            or (personal_block and personal_block.get("matched"))
+        )
 
         return {
             "known": known,
@@ -621,6 +715,7 @@ async def match_ep(
             "bestScore": round(strong[0][1], 3) if strong else 0.0,
             "clusterId": cluster_id,
             "clusterSize": cluster_size,
+            "personalBlock": personal_block,
             "matches": [
                 {"callId": c, "score": round(s, 3)} for c, s in strong[:5]
             ],

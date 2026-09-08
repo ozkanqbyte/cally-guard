@@ -176,6 +176,7 @@ export default defineAgent({
     const meta = safeJson(ctx.room.metadata) || {};
     let fcmToken = meta.fcmToken;
     let ttsTier = meta.ttsTier; // 'free' | 'premium' | 'top' — comes from the guard_pending doc the app writes (claimed below); default applied after the claim
+    let userUid = null; // Firebase Auth uid of the phone owner — for the personal voice-block check
 
     console.log('[diag] waiting for caller');
     const caller = await waitForCaller(ctx);
@@ -213,6 +214,7 @@ export default defineAgent({
       if (reg) {
         fcmToken = reg.fcmToken || fcmToken;
         ttsTier = reg.ttsTier || ttsTier;
+        userUid = reg.uid || null;
         console.log('[guard] claimed push registration for the calling phone');
       }
     }
@@ -337,12 +339,16 @@ export default defineAgent({
         }).catch(() => {});
       },
       onRisk: (r) => {
-        if (r.band === 'high' || r.band === 'severe' || r.risk >= 60) {
+        const abusive = r.category === 'threat' || r.category === 'harassment';
+        if (r.band === 'high' || r.band === 'severe' || r.risk >= 60 || abusive) {
           if (recorder) recorder.arm();
-          flagCallerAsScam(r.reasons.map((x) => x.id)).catch(() => {});
+          // only feed the community *scam* DB for scam calls — a threat/harassment
+          // call is the user's private matter, not a shared spam signal.
+          if (!abusive) flagCallerAsScam(r.reasons.map((x) => x.id)).catch(() => {});
         }
         pushToPhone(fcmToken, {
           type: 'guard_risk', callId, risk: r.risk, band: r.band,
+          category: r.category || 'scam',
           reasons: r.reasons.map((x) => x.id),
         }).catch(() => {});
       },
@@ -364,6 +370,7 @@ export default defineAgent({
             reason,
             risk: summary.risk,
             band: summary.band,
+            category: summary.category || 'scam',
             turns: summary.turns,
             // which scam pattern(s) fired — lets the admin panel show a real
             // "most common scam types" breakdown instead of a placeholder.
@@ -398,6 +405,8 @@ export default defineAgent({
                 reason,
                 risk: summary.risk,
                 band: summary.band,
+                category: summary.category || 'scam',
+                reasons: summary.reasons.map((r) => r.id),
                 audioPath: audioDest,
                 transcriptPath: transcriptDest,
               });
@@ -419,6 +428,7 @@ export default defineAgent({
                 headers: { 'content-type': 'application/x-www-form-urlencoded' },
                 body: new URLSearchParams({
                   gcs_path: `guard_recordings/${callId}/audio.wav`,
+                  ...(userUid ? { user_key: userUid } : {}),
                 }),
               }).then((r) => r.json()),
               new Promise((_, rej) => setTimeout(() => rej(new Error('vp timeout')), 5000)),
@@ -426,16 +436,19 @@ export default defineAgent({
             // `push` = confident match AND (admin-verified voice OR seen in
             // >= N recorded scam calls). Falls back to `known` for older
             // voiceprint builds that don't return `push`.
-            const shouldPush = vp && (vp.push ?? vp.known);
+            const pb = vp && vp.personalBlock && vp.personalBlock.matched
+              ? vp.personalBlock : null;
+            const shouldPush = vp && (vp.push ?? vp.known ?? !!pb);
             if (shouldPush) {
               await pushToPhone(fcmToken, {
                 type: 'guard_voice_match',
                 callId,
-                score: String(vp.bestScore ?? ''),
+                score: String(pb ? pb.score : (vp.bestScore ?? '')),
                 clusterId: String(vp.clusterId ?? ''),
                 clusterSize: String(vp.clusterSize ?? 0),
                 verified: vp.verified ? '1' : '0',
-                label: String(vp.label ?? ''),
+                label: String(pb ? pb.label : (vp.label ?? '')),
+                personalBlock: pb ? '1' : '0',
               }).catch(() => {});
             }
           } catch (e) {
@@ -477,7 +490,11 @@ async function claimPendingRegistration(callerNumber) {
   ref.delete().catch(() => {});
   const at = typeof data.at === 'number' ? data.at : (data.at?.toMillis?.() ?? 0);
   if (at && Date.now() - at > 120000) return null;
-  return { fcmToken: data.fcmToken || null, ttsTier: data.ttsTier || null };
+  return {
+    fcmToken: data.fcmToken || null,
+    ttsTier: data.ttsTier || null,
+    uid: data.uid || null,
+  };
 }
 
 function waitForCaller(ctx) {

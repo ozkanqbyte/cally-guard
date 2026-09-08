@@ -13,6 +13,7 @@ import { getLocale } from './locales/index.mjs';
  * @property {number} score          0-100 scam likelihood
  * @property {number} confidence     0-100 how sure we are of that score
  * @property {Band} band
+ * @property {'scam'|'threat'|'harassment'} category  dominant signal category
  * @property {string[]} signals      signal ids seen so far
  * @property {Reason[]} reasons      ordered most-severe first
  * @property {boolean} recommendGuard true once handing to AI Guard is worth offering
@@ -21,6 +22,20 @@ import { getLocale } from './locales/index.mjs';
 const SEVERITY_RANK = { high: 2, medium: 1, low: 0 };
 const GUARD_SCORE = 45;
 const GUARD_CONFIDENCE = 45;
+
+/**
+ * The one word the app uses to headline the call. A threat outranks everything
+ * (safety), then harassment, then the default scam framing. Signals with no
+ * `category` are 'scam'.
+ * @param {{category?:string}[]} seenSignals
+ * @returns {'scam'|'threat'|'harassment'}
+ */
+function dominantCategory(seenSignals) {
+  const cats = new Set(seenSignals.map((s) => s.category || 'scam'));
+  if (cats.has('threat')) return 'threat';
+  if (cats.has('harassment')) return 'harassment';
+  return 'scam';
+}
 
 // signals where the caller is *asking for* something sensitive — used to detect
 // a caller who keeps pushing after we say no
@@ -177,6 +192,10 @@ export class DetectionSession {
     const ask = ASK_IDS.some((id) => ids.has(id));
     if (pressure && ask) score += 15;
 
+    // A credible threat / blackmail line isn't cumulative evidence the way a
+    // scam pattern is — one is enough to matter. Bump it over the recording bar.
+    if (seen.some((s) => s.category === 'threat')) score += 20;
+
     // the caller keeps demanding the code / card / transfer after we deflected —
     // a legit caller drops it; a scammer pushes. Each repeat ratchets the score
     // so ~3 demands for a password takes the call past the hang-up line.
@@ -202,8 +221,9 @@ export class DetectionSession {
 
   /** @returns {DetectionResult} */
   result() {
-    const reasons = [...this._seen]
-      .map((id) => this._lex.byId.get(id))
+    const seen = [...this._seen].map((id) => this._lex.byId.get(id));
+    const reasons = seen
+      .slice()
       .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity])
       .map((s) => ({ id: s.id, label: s.label, severity: s.severity }));
     const confidence = this._confidence();
@@ -211,6 +231,7 @@ export class DetectionSession {
       score: this._score,
       confidence,
       band: bandFor(this._score, this._thresholds),
+      category: dominantCategory(seen),
       signals: reasons.map((r) => r.id),
       reasons,
       recommendGuard: this._score >= GUARD_SCORE && confidence >= GUARD_CONFIDENCE,
@@ -234,6 +255,7 @@ export function scoreTranscript(callerTurns, opts = {}) {
 /** The built-in signals for a locale (id, label, severity, base phrase-groups) — for the admin editor. */
 export function lexiconFor(locale) {
   return localeFor(locale).signals.map((s) => ({
-    id: s.id, label: s.label, severity: s.severity, base: s.anyOf,
+    id: s.id, label: s.label, severity: s.severity,
+    category: s.category || 'scam', base: s.anyOf,
   }));
 }

@@ -26,6 +26,39 @@ test('legitimate calls are never flagged as scams', () => {
   }
 });
 
+test('a threat call is flagged as category "threat" and armed for recording', () => {
+  const v = scoreTranscript([
+    'Borcunu bugün ödemezsen adresini biliyorum, üstüne adam gönderirim.',
+    'Son uyarım, pişman olacaksın.',
+  ]);
+  assert.equal(v.category, 'threat');
+  assert.ok(v.signals.includes('threat_intimidation'), `signals: ${v.signals}`);
+  assert.ok(['high', 'severe'].includes(v.band), `band: ${v.band} (score ${v.score})`);
+});
+
+test('sextortion is caught and outranks any scam framing in the category', () => {
+  const v = scoreTranscript([
+    'Kameranı hackledim, görüntülerin elimde.',
+    'Bitcoin göndermezsen hepsini ailene gönderirim, ifşa ederim.',
+  ]);
+  assert.equal(v.category, 'threat');
+  assert.ok(v.signals.includes('sextortion_blackmail'));
+});
+
+test('repeated-harassment language is category "harassment", not "scam"', () => {
+  const v = scoreTranscript([
+    'Beni engelle, numaramı değiştirir yine ararım. Seni rahat bırakmayacağım.',
+    'Gece gündüz arayacağım.',
+  ]);
+  assert.equal(v.category, 'harassment');
+  assert.ok(v.signals.includes('harassment_abuse'));
+});
+
+test('a normal scam call is still category "scam"', () => {
+  const v = scoreTranscript(SCAM_CALLS.masak);
+  assert.equal(v.category, 'scam');
+});
+
 test('a plain bank reminder does not trip bank impersonation', () => {
   // This is the exact false positive the design avoids: a real bank does call
   // and say "bankadan ariyorum". Only the fraud framing counts.

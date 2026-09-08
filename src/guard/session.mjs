@@ -82,6 +82,7 @@ export class GuardCall {
       action: decision.action,
       risk: verdict.score,
       band: verdict.band,
+      category: verdict.category,
       reasons: verdict.reasons,
     };
   }
@@ -93,8 +94,9 @@ export class GuardCall {
       callId: this.id,
       risk: verdict.score,
       band: verdict.band,
+      category: verdict.category,
       reasons: verdict.reasons,
-      advice: adviceFor(verdict.band),
+      advice: adviceFor(verdict.band, verdict.category),
       turns: this._turn,
       transcript: this._transcript,
       // 2–3 sanitised lines for the shareable "caught a scammer" card
@@ -103,8 +105,21 @@ export class GuardCall {
   }
 }
 
-/** @param {string} band */
-function adviceFor(band) {
+/**
+ * @param {string} band
+ * @param {'scam'|'threat'|'harassment'} [category]
+ */
+function adviceFor(band, category = 'scam') {
+  if (category === 'threat') {
+    return 'Bu aramada tehdit / şantaj ifadeleri var. Bu numarayı engelle, ' +
+      'görüşmeyi kaydını sakla ve tehdit ciddiyse kolluğa (155) başvur. ' +
+      'Şantaja asla ödeme yapma.';
+  }
+  if (category === 'harassment') {
+    return 'Bu arama taciz / ısrarlı rahatsız etme niteliğinde. Numarayı engelle. ' +
+      'Devam ederse kayıtlarını biriktir; ısrarlı takip için savcılığa şikâyet ' +
+      'edebilirsin.';
+  }
   if (band === 'severe' || band === 'high') {
     return 'Yüksek dolandırıcılık şüphesi. Bu numarayı engelle. Bankan veya ' +
       'ilgili kurumla yalnızca resmi numaradan iletişime geç. Kimseye kod, ' +

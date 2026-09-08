@@ -269,6 +269,69 @@ export const signals = [
       ['guaranteed job, just pay'],
     ],
   },
+
+  // ── non-fraud abuse ── same ids as tr.mjs; category != 'scam' ────────────
+  {
+    id: 'threat_intimidation',
+    label: 'Threats / intimidation',
+    severity: 'high',
+    weight: 34,
+    category: 'threat',
+    anyOf: [
+      ['i will find you'], ['i know where you live'], ['i have your address'],
+      ['i know your address'], ['you will regret this'], ['you will be sorry'],
+      ['i will make you pay'], ['i will hurt you'], ['i will kill you'],
+      ['i will destroy you'], ['i will ruin you'], ['watch your back'],
+      ['i will come to your house'], ['i am sending someone'],
+      ['harm your family'], ['hurt your kids'], ['this is your last warning'],
+      ['i am threatening you'],
+    ],
+  },
+  {
+    id: 'sextortion_blackmail',
+    label: 'Blackmail / threat to leak private material',
+    severity: 'high',
+    weight: 38,
+    category: 'threat',
+    anyOf: [
+      ['i will leak your'], ['i have your photos'], ['i have your videos'],
+      ['i will send the video'], ['i will expose you'], ['i will post it'],
+      ['send it to your family'], ['send it to your boss'], ['send it to everyone'],
+      ['i hacked your camera'], ['i have access to your phone'],
+      ['pay or i post'], ['bitcoin', 'or i leak'], ['crypto', 'or i expose'],
+      ['screenshots of everything'],
+    ],
+  },
+  {
+    id: 'harassment_abuse',
+    label: 'Harassment / abuse / repeated unwanted calls',
+    severity: 'high',
+    weight: 28,
+    category: 'harassment',
+    anyOf: [
+      ['i will not leave you alone'], ['i will keep calling'],
+      ['i will call as much as i want'], ['block me and i will call again'],
+      ['i will call every day'], ['i will call day and night'],
+      ['i am following you'], ['i am watching you'], ['wherever you go'],
+      ['you bitch'], ['you piece of'], ['called to insult you'],
+      ['called just to swear at you'],
+    ],
+  },
+  {
+    id: 'debt_collection_abuse',
+    label: 'Abusive / illegal debt-collection pressure',
+    severity: 'medium',
+    weight: 22,
+    category: 'harassment',
+    anyOf: [
+      ['i will call your employer'], ['i will call your boss'],
+      ['i will call your neighbors'], ['i will call your family'],
+      ['i will call everyone in your contacts'], ['tell everyone you owe'],
+      ['i will show up at your door'], ['i will seize your'],
+      ['i call whenever i want'], ['calling at midnight because'],
+      ['whatever it takes to collect'],
+    ],
+  },
 ];
 
 export const benignMarkers = [
