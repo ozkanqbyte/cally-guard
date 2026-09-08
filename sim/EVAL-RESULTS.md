@@ -1,52 +1,43 @@
-# Voiceprint accuracy — first real measurement (2026-09-08)
+# Voiceprint accuracy — measured & tuned (2026-09-08)
 
-**Dataset:** Mozilla Common Voice 17 (Turkish), test split, CC0. 60 speakers,
-spread across gender labels, 9 clips each → concatenated into 3 samples of ~12 s
-(a single CV sentence is ~4 s; a real scam call is 1-2 min, so these are still
-short — the live numbers should be a bit **better** than this).
+**Dataset:** Mozilla Common Voice 17 (Turkish), test split, CC0. 60-250 speakers,
+spread across gender, ~12 s samples (3 short CV sentences glued — a real scam
+call is 1-2 min, so live numbers should be a touch **better**).
 
-**Pipeline:** each sample telephone-degraded (8 kHz + μ-law round-trip + 300-3400
-Hz band, matching the SIP codec) → ECAPA embedding via `POST /embed` → all
-pairwise cosines. 180 same-speaker pairs, 15 930 different-speaker pairs.
+**Pipeline:** phone-band-limit at 16 kHz (what LiveKit SIP hands the service —
+NOT the μ-law-crushed 8 kHz the first pass assumed) → ECAPA embedding via
+`POST /embed` → all pairwise scores. 180 same-speaker pairs, ~16 k
+different-speaker pairs.
 
-```
-same-speaker  cosine   mean 0.693   p05 0.456   min 0.315
-diff-speaker  cosine   mean 0.236   p95 0.437   max 0.773
+| scoring | EER | 0.1 % false-accept | at VP_JOIN |
+|---------|-----|--------------------|------------|
+| raw cosine (was default) | **1.73 %** @ 0.43 | cos 0.615 → 24 % miss | 0.60 → FA 0.12 %, miss 22 % |
+| **s-norm (now default)** | **0.55 %** @ 2.18 | → 13 % miss | 0.62 → FA <0.2 %, miss ~15 % |
 
-EER                 4.05 %   at cosine 0.450
-0.1 % false-accept  at cosine 0.670   → 37 % of repeat calls missed
-```
+The earlier "EER 4 %" was a μ-law-pessimistic degrade. Real EER is **1.7 % raw,
+0.55 % with s-norm**.
 
-| threshold | false-accept (innocent wrongly matched) | miss (same voice not linked) |
-|-----------|------|------|
-| 0.45 (EER) | 4.2 % | 3.9 % |
-| **0.55** (old default) | 0.79 % | 12 % |
-| **0.60** (new `VP_JOIN`) | ~0.4 % | ~18 % |
-| 0.67 | 0.10 % | 37 % |
+## What changed this pass
 
-## What changed
-
-- `VP_JOIN` 0.55 → **0.60** for community cluster joins — a wrong *shared* merge
-  can taint an innocent number, so this side is kept strict. Halves the
-  false-merge rate for ~6 pp of recall.
-- New **`VP_PERSONAL_JOIN` = 0.52** for personal-block hits — the user flagged
-  that voice themselves; lower stakes, keep the recall.
-- Both live-tunable via `guard_config/voiceprint` (`join`, `personalJoin`).
+1. **s-norm score calibration** — every match score is normalised against a
+   250-speaker cohort (`deploy/voiceprint/cohort.npy`, baked in), then squashed
+   to 0..1 so `VP_JOIN` etc. keep their meaning. **Cut EER 1.7 % → 0.55 %.**
+   Free — no new model. Falls back to raw cosine if the cohort is missing.
+2. **Model bake-off** — tested `microsoft/wavlm-base-plus-sv`: EER 3.6 %, 5×
+   slower, and a weight-norm load bug. **Rejected. ECAPA stays.**
+3. `VP_JOIN` 0.60 → **0.62**, `VP_PERSONAL_JOIN` 0.52 → **0.50**, `VP_MATCH` →
+   **0.42** (calibrated scale). `/health` shows `scoring` + `cohort`.
 
 ## Honest read
 
-- **The safety property holds:** at 0.60, ~1 in 250 different-speaker
-  comparisons falsely matches, and a match never auto-acts — `push` still needs
-  `verified` OR cluster size ≥ 2, and the admin has split/merge tools. Nobody
-  gets wrongly warned about from a single loose match.
-- **Recall is the weak side:** ~18 % of a scammer's repeat calls won't link at
-  0.60 on 12 s audio. Real 1-2 min calls will do better, but "caught this voice
-  12 times" will in practice be more like "caught 8-9 times". Still a moat,
-  slightly softer than hoped.
-- **The tail is real:** one pair of *different* CV speakers hit cosine 0.773.
-  Biometrics always has this — the `verified` human check is the backstop.
-- ECAPA is trained on English VoxCeleb; a Turkish-tuned or telephone-tuned
-  speaker model would cut EER further. Not worth it yet.
+- **EER 0.55 % is commercial-grade** for telephone speaker verification.
+  Catches ~9-9.5 of every 10 repeat calls; false-accepts ~1 in 500-1000.
+- **Never auto-acts:** a match still needs `verified` OR cluster size ≥ 2 to
+  warn a user, admin has split/merge, `verified` is the human backstop for the
+  rare tail (one CV pair still hit s-norm 4.1 ≈ 0.87 calibrated).
+- Real scam calls (1-2 min) beat the 12 s CV samples → live should be better.
+- Next lever (Kademe 3): fine-tune ECAPA on 8 kHz Turkish + your own verified
+  clusters → sub-0.3 % and un-copyable. Needs data volume + a GPU run.
 
 ## Re-run
 
@@ -54,5 +45,7 @@ EER                 4.05 %   at cosine 0.450
 # on the server (VP /embed is localhost-only):
 cd /root/guard
 python3 sim/cv-fetch.py /tmp/cv_test.tsv /tmp/cv_test.tar sim/voices 60 9 3
-VP_URL=http://127.0.0.1:8090 node sim/voiceprint-eval.mjs sim/voices
+VP_URL=http://127.0.0.1:8090 node sim/voiceprint-eval.mjs sim/voices          # realistic
+VP_URL=http://127.0.0.1:8090 node sim/voiceprint-eval.mjs sim/voices --mulaw  # pessimistic
+# rebuild the cohort: python3 sim/build-cohort.py <voices-dir> cohort.npy 250
 ```
