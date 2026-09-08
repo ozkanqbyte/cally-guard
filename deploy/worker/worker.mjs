@@ -20,6 +20,9 @@ import { writeFile, readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { VoiceAgent } from '../../src/agent/voice-agent.mjs';
+import {
+  shouldArmRecording, shouldFlagCommunity, shouldPushVoiceMatch,
+} from '../../src/guard/worker-policy.mjs';
 import { humanize } from '../../src/agent/humanize.mjs';
 import { llmPolishFromEnv, llmConverseFromEnv } from '../../src/agent/providers/llm-polish.mjs';
 import { LexiconOverlay } from '../../src/detection/overlay.mjs';
@@ -345,13 +348,10 @@ export default defineAgent({
         }).catch(() => {});
       },
       onRisk: (r) => {
-        const abusive = r.category === 'threat' || r.category === 'harassment';
-        if (r.band === 'high' || r.band === 'severe' || r.risk >= 60 || abusive) {
-          if (recorder) recorder.arm();
-          // only feed the community *scam* DB for scam calls — a threat/harassment
-          // call is the user's private matter, not a shared spam signal.
-          if (!abusive) flagCallerAsScam(r.reasons.map((x) => x.id)).catch(() => {});
-        }
+        if (shouldArmRecording(r) && recorder) recorder.arm();
+        // only feed the community *scam* DB for scam calls — a threat/harassment
+        // call is the user's private matter, not a shared spam signal.
+        if (shouldFlagCommunity(r)) flagCallerAsScam(r.reasons.map((x) => x.id)).catch(() => {});
         pushToPhone(fcmToken, {
           type: 'guard_risk', callId, risk: r.risk, band: r.band,
           category: r.category || 'scam',
@@ -444,8 +444,7 @@ export default defineAgent({
             // voiceprint builds that don't return `push`.
             const pb = vp && vp.personalBlock && vp.personalBlock.matched
               ? vp.personalBlock : null;
-            const shouldPush = vp && (vp.push ?? vp.known ?? !!pb);
-            if (shouldPush) {
+            if (shouldPushVoiceMatch(vp)) {
               await pushToPhone(fcmToken, {
                 type: 'guard_voice_match',
                 callId,

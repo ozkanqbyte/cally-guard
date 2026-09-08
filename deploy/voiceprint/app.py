@@ -780,6 +780,26 @@ async def match_ep(
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.post("/embed")
+async def embed_ep(
+    file: Optional[UploadFile] = File(default=None),
+    gcs_path: Optional[str] = Form(default=None),
+):
+    """Raw 192-d speaker embedding for one clip — for offline accuracy evals
+    (sim/voiceprint-eval.mjs). Not used in the live path."""
+    try:
+        if gcs_path:
+            raw = bucket.blob(gcs_path).download_as_bytes()
+        elif file is not None:
+            raw = await file.read()
+        else:
+            return JSONResponse({"error": "no audio"}, status_code=400)
+        vec = embed_wav_bytes(raw)
+        return {"dim": int(vec.shape[0]), "vec": vec.tolist()}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/reindex")
 def reindex():
     load_index()
