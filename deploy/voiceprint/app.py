@@ -16,6 +16,12 @@ What it does
      guard_voice_clusters/{clusterId} rolled-up: size, callIds, numbers, types
      guard_recordings/{callId}        voiceClusterId / voiceMatchCount / voiceMatches
 4. Answers POST /match for the worker: "is this live caller a known voice?"
+5. Executes admin curation queued in `guard_voice_ops` (merge / split / delete)
+   and re-reads its thresholds from `guard_config/voiceprint` on every poll, so
+   the admin panel can tune the matcher and fix bad clusters without a redeploy.
+
+Speaker embeddings model voice *timbre*, not words — the matcher is fully
+language-independent and works for callers in any language.
 
 Privacy: only the embedding is stored long-term. The raw WAV keeps its existing
 30-day lifecycle and is never copied here.
@@ -26,6 +32,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from math import gcd
 from typing import Optional
 
@@ -39,13 +46,14 @@ from fastapi.responses import JSONResponse
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
 
-# ── config ──────────────────────────────────────────────────────────────────
+# ── config (env defaults; guard_config/voiceprint overrides at runtime) ──────
 SA_PATH = os.environ.get("FIREBASE_SA", "/app/firebase-service-account.json")
 BUCKET = os.environ.get(
     "FIREBASE_STORAGE_BUCKET", "callypro-fcc43.firebasestorage.app"
 )
 VP_JOIN = float(os.environ.get("VP_JOIN", "0.55"))   # cosine to treat as same voice
 VP_MATCH = float(os.environ.get("VP_MATCH", "0.45"))  # cosine worth showing at all
+VP_MIN_CLUSTER_PUSH = int(os.environ.get("VP_MIN_CLUSTER_PUSH", "2"))  # size to warn the user
 VP_MAX_SEC = int(os.environ.get("VP_MAX_SEC", "25"))
 VP_POLL_SEC = int(os.environ.get("VP_POLL_SEC", "60"))
 TARGET_SR = 16000
@@ -156,8 +164,37 @@ def _number_from_call_id(call_id: str) -> str:
     return m.group(1) if m else ""
 
 
+# ── runtime config ──────────────────────────────────────────────────────────
+def _load_config() -> None:
+    """Pull admin-tuned thresholds from guard_config/voiceprint. Values are
+    range-checked; anything missing / silly keeps the current value."""
+    global VP_JOIN, VP_MATCH, VP_MIN_CLUSTER_PUSH
+    try:
+        snap = db.collection("guard_config").document("voiceprint").get()
+    except Exception as e:  # noqa: BLE001
+        print("[vp] config read failed:", e)
+        return
+    if not snap.exists:
+        return
+    c = snap.to_dict() or {}
+    j, m, mc = c.get("join"), c.get("match"), c.get("minClusterForPush")
+    if isinstance(j, (int, float)) and 0.30 <= float(j) <= 0.90:
+        VP_JOIN = float(j)
+    if isinstance(m, (int, float)) and 0.25 <= float(m) <= 0.90:
+        VP_MATCH = float(m)
+    VP_MATCH = min(VP_MATCH, VP_JOIN)
+    if isinstance(mc, (int, float)) and 1 <= int(mc) <= 50:
+        VP_MIN_CLUSTER_PUSH = int(mc)
+
+
+# ── cluster docs ────────────────────────────────────────────────────────────
+def _cluster_ref(cluster_id: str):
+    return db.collection("guard_voice_clusters").document(cluster_id)
+
+
 def _update_cluster(cluster_id: str, call_id: str, rec: dict) -> None:
-    ref = db.collection("guard_voice_clusters").document(cluster_id)
+    """Incremental roll-up used by the live backfill (one new call at a time)."""
+    ref = _cluster_ref(cluster_id)
     snap = ref.get()
     num = _number_from_call_id(call_id)
     reasons = rec.get("reasons") or []
@@ -187,12 +224,227 @@ def _update_cluster(cluster_id: str, call_id: str, rec: dict) -> None:
                 "numbers": [num] if num else [],
                 "scamTypes": reasons,
                 "label": "",
+                "verified": False,
                 "firstSeen": firestore.SERVER_TIMESTAMP,
                 "lastSeen": firestore.SERVER_TIMESTAMP,
             }
         )
 
 
+def _write_cluster(
+    cluster_id: str,
+    call_ids,
+    preserve: dict,
+    extra_first=None,
+    extra_last=None,
+) -> None:
+    """Full rebuild of a cluster doc from its member voiceprints. Used by the
+    curation ops (merge / split / delete-orphan) where the membership changed
+    wholesale."""
+    call_ids = sorted(set(call_ids))
+    nums, types, ats = set(), set(), []
+    for cid in call_ids:
+        s = db.collection("guard_voiceprints").document(cid).get()
+        if not s.exists:
+            continue
+        d = s.to_dict() or {}
+        if d.get("number"):
+            nums.add(d["number"])
+        for r in (d.get("reasons") or []):
+            types.add(r)
+        a = d.get("at")
+        if isinstance(a, (int, float)):
+            ats.append(float(a))
+
+    body = {
+        "clusterId": cluster_id,
+        "size": len(call_ids),
+        "callIds": call_ids,
+        "numbers": sorted(nums),
+        "scamTypes": sorted(types),
+        "label": preserve.get("label", "") or "",
+        "verified": bool(preserve.get("verified", False)),
+        "rebuiltAt": firestore.SERVER_TIMESTAMP,
+    }
+    if preserve.get("mergedFrom"):
+        body["mergedFrom"] = preserve["mergedFrom"]
+    if preserve.get("notes"):
+        body["notes"] = preserve["notes"]
+
+    firsts = [datetime.fromtimestamp(min(ats) / 1000, tz=timezone.utc)] if ats else []
+    lasts = [datetime.fromtimestamp(max(ats) / 1000, tz=timezone.utc)] if ats else []
+    firsts += [x for x in (extra_first or []) if x is not None]
+    lasts += [x for x in (extra_last or []) if x is not None]
+    if firsts:
+        body["firstSeen"] = min(firsts)
+    if lasts:
+        body["lastSeen"] = max(lasts)
+
+    _cluster_ref(cluster_id).set(body, merge=True)
+
+
+def _chunked_reassign(call_ids, cluster_id: str) -> None:
+    ids = list(dict.fromkeys(call_ids))
+    for i in range(0, len(ids), 150):
+        batch = db.batch()
+        for cid in ids[i:i + 150]:
+            batch.set(
+                db.collection("guard_voiceprints").document(cid),
+                {"clusterId": cluster_id},
+                merge=True,
+            )
+            batch.set(
+                db.collection("guard_recordings").document(cid),
+                {"voiceClusterId": cluster_id},
+                merge=True,
+            )
+        batch.commit()
+
+
+# ── curation ops (queued by the admin panel in guard_voice_ops) ─────────────
+def _op_merge(cluster_ids) -> dict:
+    cluster_ids = [c for c in dict.fromkeys(cluster_ids) if c]
+    if len(cluster_ids) < 2:
+        raise ValueError("merge needs >= 2 clusters")
+    snaps: dict[str, dict] = {}
+    for c in cluster_ids:
+        s = _cluster_ref(c).get()
+        if s.exists:
+            snaps[c] = s.to_dict() or {}
+    if len(snaps) < 2:
+        raise ValueError("merge: fewer than 2 of those clusters still exist")
+
+    target = sorted(snaps.keys(), key=lambda c: (-int(snaps[c].get("size", 0)), c))[0]
+    all_calls: set[str] = set()
+    verified = False
+    labels: list[str] = []
+    firsts, lasts = [], []
+    for c, d in snaps.items():
+        all_calls |= set(d.get("callIds", []))
+        verified = verified or bool(d.get("verified"))
+        if d.get("label"):
+            labels.append(d["label"])
+        if d.get("firstSeen"):
+            firsts.append(d["firstSeen"])
+        if d.get("lastSeen"):
+            lasts.append(d["lastSeen"])
+
+    _chunked_reassign(all_calls, target)
+    preserve = {
+        "label": snaps[target].get("label") or (labels[0] if labels else ""),
+        "verified": verified,
+        "notes": snaps[target].get("notes"),
+        "mergedFrom": sorted(set(snaps.keys()) - {target}),
+    }
+    _write_cluster(target, all_calls, preserve, firsts, lasts)
+    for c in snaps:
+        if c != target:
+            _cluster_ref(c).delete()
+    return {"target": target, "calls": len(all_calls), "absorbed": len(snaps) - 1}
+
+
+def _op_split(cluster_id: str, move_calls) -> dict:
+    src = _cluster_ref(cluster_id).get()
+    if not src.exists:
+        raise ValueError("split: cluster no longer exists")
+    sd = src.to_dict() or {}
+    members = set(sd.get("callIds", []))
+    move = set(move_calls) & members
+    if not move:
+        raise ValueError("split: none of those calls are in this cluster")
+    if len(move) >= len(members):
+        raise ValueError("split: that is every call — nothing left behind")
+
+    new_id = _new_cluster_id()
+    _chunked_reassign(move, new_id)
+    remain = members - move
+    _write_cluster(
+        cluster_id, remain,
+        {"label": sd.get("label", ""), "verified": sd.get("verified", False),
+         "notes": sd.get("notes")},
+        [sd.get("firstSeen")], [sd.get("lastSeen")],
+    )
+    _write_cluster(new_id, move, {"label": "", "verified": False})
+    return {"newCluster": new_id, "moved": len(move), "kept": len(remain)}
+
+
+def _op_delete(cluster_id: str, mode: str) -> dict:
+    src = _cluster_ref(cluster_id).get()
+    if not src.exists:
+        raise ValueError("delete: cluster no longer exists")
+    members = list((src.to_dict() or {}).get("callIds", []))
+
+    if mode == "purge":
+        for cid in members:
+            db.collection("guard_voiceprints").document(cid).delete()
+            db.collection("guard_recordings").document(cid).set(
+                {
+                    "voiceClusterId": firestore.DELETE_FIELD,
+                    "voiceMatchCount": firestore.DELETE_FIELD,
+                    "voiceMatches": firestore.DELETE_FIELD,
+                    "voiceprintPurged": True,
+                },
+                merge=True,
+            )
+        _cluster_ref(cluster_id).delete()
+        return {"purged": len(members)}
+
+    # orphan: every call becomes its own fresh singleton cluster
+    for cid in members:
+        nid = _new_cluster_id()
+        db.collection("guard_voiceprints").document(cid).set(
+            {"clusterId": nid}, merge=True
+        )
+        db.collection("guard_recordings").document(cid).set(
+            {"voiceClusterId": nid}, merge=True
+        )
+        _write_cluster(nid, [cid], {"label": "", "verified": False})
+    _cluster_ref(cluster_id).delete()
+    return {"orphaned": len(members)}
+
+
+def process_ops() -> bool:
+    """Run any pending admin curation. Returns True if anything changed (the
+    caller then reloads the in-memory index)."""
+    try:
+        docs = list(db.collection("guard_voice_ops").limit(300).stream())
+    except Exception as e:  # noqa: BLE001
+        print("[vp] ops list failed:", e)
+        return False
+
+    changed = False
+    for doc in docs:
+        d = doc.to_dict() or {}
+        if d.get("status") != "pending":
+            continue
+        op = d.get("op")
+        ref = db.collection("guard_voice_ops").document(doc.id)
+        try:
+            if op == "merge":
+                res = _op_merge(list(d.get("clusterIds", [])))
+            elif op == "split":
+                res = _op_split(str(d.get("clusterId", "")), list(d.get("callIds", [])))
+            elif op == "delete":
+                res = _op_delete(str(d.get("clusterId", "")), str(d.get("mode", "orphan")))
+            else:
+                raise ValueError(f"unknown op {op!r}")
+            ref.set(
+                {"status": "done", "doneAt": firestore.SERVER_TIMESTAMP, "result": res},
+                merge=True,
+            )
+            changed = True
+            print(f"[vp] op {op} {doc.id} -> {res}")
+        except Exception as e:  # noqa: BLE001
+            ref.set(
+                {"status": "error", "doneAt": firestore.SERVER_TIMESTAMP,
+                 "error": str(e)[:300]},
+                merge=True,
+            )
+            print(f"[vp] op {op} {doc.id} FAILED: {e}")
+    return changed
+
+
+# ── backfill ────────────────────────────────────────────────────────────────
 def process_recording(doc) -> None:
     call_id = doc.id
     d = doc.to_dict() or {}
@@ -222,6 +474,7 @@ def process_recording(doc) -> None:
             "band": d.get("band"),
             "reasons": d.get("reasons", []),
             "number": _number_from_call_id(call_id),
+            "audioPath": audio_path,
             "dim": int(vec.shape[0]),
             "vec": vec.tolist(),
             "clusterId": cluster_id,
@@ -247,7 +500,7 @@ def process_recording(doc) -> None:
 
 def load_index() -> None:
     global _mat, _ids
-    ids, vecs = [], []
+    ids, vecs, cof = [], [], {}
     for doc in db.collection("guard_voiceprints").stream():
         d = doc.to_dict() or {}
         v = d.get("vec")
@@ -255,20 +508,26 @@ def load_index() -> None:
             continue
         ids.append(doc.id)
         vecs.append(np.asarray(v, dtype=np.float32))
-        _cluster_of[doc.id] = d.get("clusterId", "")
+        cof[doc.id] = d.get("clusterId", "")
     with _lock:
         _ids = ids
         _mat = np.vstack(vecs) if vecs else np.zeros((0, EMB_DIM), np.float32)
+        _cluster_of.clear()
+        _cluster_of.update(cof)
     print(f"[vp] index loaded: {len(ids)} voiceprints")
 
 
 def backfill_loop() -> None:
     try:
+        _load_config()
         load_index()
     except Exception as e:  # noqa: BLE001
-        print("[vp] index load failed:", e)
+        print("[vp] startup load failed:", e)
     while True:
         try:
+            _load_config()
+            if process_ops():
+                load_index()
             for doc in db.collection("guard_recordings").limit(300).stream():
                 d = doc.to_dict() or {}
                 if d.get("voiceprintDone"):
@@ -305,7 +564,19 @@ def health():
         "clusters": len(set(_cluster_of.values())),
         "join": VP_JOIN,
         "match": VP_MATCH,
+        "minClusterPush": VP_MIN_CLUSTER_PUSH,
     }
+
+
+@app.get("/config")
+def get_config():
+    return {"join": VP_JOIN, "match": VP_MATCH, "minClusterForPush": VP_MIN_CLUSTER_PUSH}
+
+
+@app.post("/config/reload")
+def config_reload():
+    _load_config()
+    return get_config()
 
 
 @app.post("/match")
@@ -328,12 +599,25 @@ async def match_ep(
 
         cluster_id = _cluster_of.get(strong[0][0]) if strong else None
         cluster_size = 0
+        verified = False
+        label = ""
         if cluster_id:
-            cs = db.collection("guard_voice_clusters").document(cluster_id).get()
-            cluster_size = (cs.to_dict() or {}).get("size", 0) if cs.exists else 0
+            cs = _cluster_ref(cluster_id).get()
+            if cs.exists:
+                cd = cs.to_dict() or {}
+                cluster_size = int(cd.get("size", 0))
+                verified = bool(cd.get("verified"))
+                label = cd.get("label") or ""
+
+        # what the user actually gets warned about: a confident match AND either
+        # an admin-verified voice or a voice seen in >= N recorded scam calls.
+        push = bool(known and (verified or cluster_size >= VP_MIN_CLUSTER_PUSH))
 
         return {
             "known": known,
+            "push": push,
+            "verified": verified,
+            "label": label,
             "bestScore": round(strong[0][1], 3) if strong else 0.0,
             "clusterId": cluster_id,
             "clusterSize": cluster_size,
@@ -349,3 +633,12 @@ async def match_ep(
 def reindex():
     load_index()
     return {"ok": True, "prints": len(_ids)}
+
+
+@app.post("/ops/run")
+def ops_run():
+    """Force a curation pass now instead of waiting for the poll."""
+    changed = process_ops()
+    if changed:
+        load_index()
+    return {"ok": True, "changed": changed, "prints": len(_ids)}

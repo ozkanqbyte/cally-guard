@@ -423,12 +423,19 @@ export default defineAgent({
               }).then((r) => r.json()),
               new Promise((_, rej) => setTimeout(() => rej(new Error('vp timeout')), 5000)),
             ]);
-            if (vp && vp.known) {
+            // `push` = confident match AND (admin-verified voice OR seen in
+            // >= N recorded scam calls). Falls back to `known` for older
+            // voiceprint builds that don't return `push`.
+            const shouldPush = vp && (vp.push ?? vp.known);
+            if (shouldPush) {
               await pushToPhone(fcmToken, {
                 type: 'guard_voice_match',
                 callId,
                 score: String(vp.bestScore ?? ''),
+                clusterId: String(vp.clusterId ?? ''),
                 clusterSize: String(vp.clusterSize ?? 0),
+                verified: vp.verified ? '1' : '0',
+                label: String(vp.label ?? ''),
               }).catch(() => {});
             }
           } catch (e) {
