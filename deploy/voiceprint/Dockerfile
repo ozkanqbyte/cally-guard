@@ -28,6 +28,10 @@ RUN python -c "from speechbrain.inference.speaker import EncoderClassifier; \
 EncoderClassifier.from_hparams(source='speechbrain/spkrec-ecapa-voxceleb', savedir='/app/model', run_opts={'device':'cpu'})"
 
 COPY app.py .
+# s-norm cohort (250 diverse Common Voice TR speaker embeddings) — cut EER
+# 1.7% -> 0.55% in the eval. Optional: the service falls back to raw cosine
+# if it's absent. Rebuild with sim/build-cohort.py.
+COPY cohort.npy .
 
 EXPOSE 8090
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]

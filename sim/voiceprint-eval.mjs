@@ -32,9 +32,13 @@ import { execFileSync } from 'node:child_process';
 
 const DIR = process.argv[2];
 const DEGRADE = !process.argv.includes('--no-degrade');
+// --mulaw = pessimistic (8 kHz + G.711 μ-law round-trip). Default = phone-band
+// limit only, closer to what LiveKit SIP delivers (16 kHz Opus from the carrier,
+// band-limited but not μ-law-crushed).
+const MULAW = process.argv.includes('--mulaw');
 const VP_URL = process.env.VP_URL || 'http://127.0.0.1:8090';
 const TARGET_FAR = Number(process.env.TARGET_FAR || 0.001);
-const CURRENT_JOIN = Number(process.env.VP_JOIN || 0.55);
+const CURRENT_JOIN = Number(process.env.VP_JOIN || 0.60);
 const AUDIO_EXT = new Set(['.wav', '.mp3', '.m4a', '.ogg', '.flac', '.aac', '.opus']);
 
 if (!DIR) {
@@ -57,18 +61,24 @@ function listSpeakers(root) {
 
 function telephoneDegrade(src, workdir, i) {
   const dst = join(workdir, `d${i}.wav`);
-  // 8 kHz mono, μ-law encode+decode (the SIP codec), back to 16 kHz PCM which is
-  // what the service resamples to anyway. A light highpass/lowpass mimics the
-  // phone band.
+  if (MULAW) {
+    // pessimistic: 8 kHz + G.711 μ-law encode/decode, back to 16 kHz PCM
+    execFileSync('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
+      '-ac', '1', '-ar', '8000', '-af', 'highpass=f=300,lowpass=f=3400',
+      '-c:a', 'pcm_mulaw', '-f', 'wav', join(workdir, `m${i}.wav`),
+    ]);
+    execFileSync('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', join(workdir, `m${i}.wav`),
+      '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', dst,
+    ]);
+    return dst;
+  }
+  // realistic: phone-band limit at 16 kHz (what LiveKit hands the service)
   execFileSync('ffmpeg', [
     '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
-    '-ac', '1', '-ar', '8000',
-    '-af', 'highpass=f=300,lowpass=f=3400',
-    '-c:a', 'pcm_mulaw', '-f', 'wav', join(workdir, `m${i}.wav`),
-  ]);
-  execFileSync('ffmpeg', [
-    '-hide_banner', '-loglevel', 'error', '-y', '-i', join(workdir, `m${i}.wav`),
-    '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', dst,
+    '-ac', '1', '-ar', '16000', '-af', 'highpass=f=250,lowpass=f=3600',
+    '-c:a', 'pcm_s16le', dst,
   ]);
   return dst;
 }
@@ -132,45 +142,57 @@ const mean = (a) => a.reduce((s, x) => s + x, 0) / (a.length || 1);
   }
   console.log('\n');
 
-  const same = [];
-  const diff = [];
+  // per-vec stats against the whole set as an s-norm cohort (same-speaker
+  // contamination is ~1/nSpeakers, negligible)
+  const stats = vecs.map(({ vec }) => {
+    const s = vecs.map((o) => cos(vec, o.vec));
+    const m = mean(s);
+    const sd = Math.sqrt(mean(s.map((x) => (x - m) ** 2))) || 1e-6;
+    return { m, sd };
+  });
+  const snorm = (i, j, raw) =>
+    0.5 * ((raw - stats[i].m) / stats[i].sd + (raw - stats[j].m) / stats[j].sd);
+
+  const sets = {
+    'raw cosine': { same: [], diff: [], lo: 0.20, hi: 0.95, step: 0.005 },
+    's-norm': { same: [], diff: [], lo: -1.0, hi: 6.0, step: 0.02 },
+  };
   for (let i = 0; i < vecs.length; i++) {
     for (let j = i + 1; j < vecs.length; j++) {
-      const c = cos(vecs[i].vec, vecs[j].vec);
-      (vecs[i].speaker === vecs[j].speaker ? same : diff).push(c);
+      const raw = cos(vecs[i].vec, vecs[j].vec);
+      const sn = snorm(i, j, raw);
+      const bucket = vecs[i].speaker === vecs[j].speaker ? 'same' : 'diff';
+      sets['raw cosine'][bucket].push(raw);
+      sets['s-norm'][bucket].push(sn);
     }
   }
-  if (!same.length || !diff.length) {
-    console.error('not enough pairs — need >=2 clips for at least one speaker and >=2 speakers');
+  if (!sets['raw cosine'].same.length || !sets['raw cosine'].diff.length) {
+    console.error('not enough pairs — need >=2 clips for a speaker and >=2 speakers');
     process.exit(2);
   }
 
-  // sweep thresholds
-  let eer = { t: 0, v: 1 };
-  let farTarget = null;
-  for (let t = 0.20; t <= 0.95; t += 0.005) {
-    const far = diff.filter((c) => c >= t).length / diff.length;   // different speakers wrongly matched
-    const frr = same.filter((c) => c < t).length / same.length;    // same speaker missed
-    if (Math.abs(far - frr) < eer.v) eer = { t, v: Math.abs(far - frr), far, frr };
-    if (farTarget === null && far <= TARGET_FAR) farTarget = { t, far, frr };
-  }
-  const curFar = diff.filter((c) => c >= CURRENT_JOIN).length / diff.length;
-  const curFrr = same.filter((c) => c < CURRENT_JOIN).length / same.length;
-
   const f = (x) => (x * 100).toFixed(2) + '%';
-  console.log(`same-speaker  cosine   mean ${mean(same).toFixed(3)}   p05 ${pct(same, 0.05).toFixed(3)}   min ${Math.min(...same).toFixed(3)}   (n=${same.length})`);
-  console.log(`diff-speaker  cosine   mean ${mean(diff).toFixed(3)}   p95 ${pct(diff, 0.95).toFixed(3)}   max ${Math.max(...diff).toFixed(3)}   (n=${diff.length})`);
-  console.log();
-  console.log(`EER                 ${f(eer.v ? (eer.far + eer.frr) / 2 : 0)}  at cosine ${eer.t.toFixed(3)}   (false-accept ${f(eer.far)}, miss ${f(eer.frr)})`);
-  if (farTarget) {
-    console.log(`target ${f(TARGET_FAR)} FA   at cosine ${farTarget.t.toFixed(3)}   → miss rate ${f(farTarget.frr)}`);
-  } else {
-    console.log(`target ${f(TARGET_FAR)} FA   not reachable on this set (need more / harder negatives)`);
+  console.log(`degrade: ${DEGRADE ? (MULAW ? '8kHz + μ-law (pessimistic)' : 'phone-band 16kHz (realistic)') : 'none'}\n`);
+
+  for (const [label, S] of Object.entries(sets)) {
+    const { same, diff, lo, hi, step } = S;
+    let eer = { t: 0, v: 1, far: 0, frr: 0 };
+    let farT = null;
+    for (let t = lo; t <= hi; t += step) {
+      const far = diff.filter((c) => c >= t).length / diff.length;
+      const frr = same.filter((c) => c < t).length / same.length;
+      if (Math.abs(far - frr) < eer.v) eer = { t, v: Math.abs(far - frr), far, frr };
+      if (farT === null && far <= TARGET_FAR) farT = { t, far, frr };
+    }
+    console.log(`── ${label} ──`);
+    console.log(`  same  mean ${mean(same).toFixed(3)}  p05 ${pct(same, 0.05).toFixed(3)}   diff  mean ${mean(diff).toFixed(3)}  p95 ${pct(diff, 0.95).toFixed(3)}  max ${Math.max(...diff).toFixed(3)}`);
+    console.log(`  EER ${f((eer.far + eer.frr) / 2)} @ ${eer.t.toFixed(3)}   |   ${f(TARGET_FAR)} FA @ ${farT ? farT.t.toFixed(3) + ' → miss ' + f(farT.frr) : 'unreachable'}`);
+    if (label === 'raw cosine') {
+      const cf = diff.filter((c) => c >= CURRENT_JOIN).length / diff.length;
+      const cm = same.filter((c) => c < CURRENT_JOIN).length / same.length;
+      console.log(`  current VP_JOIN ${CURRENT_JOIN.toFixed(2)} → FA ${f(cf)}  miss ${f(cm)}`);
+    }
+    console.log();
   }
-  console.log();
-  console.log(`CURRENT VP_JOIN ${CURRENT_JOIN.toFixed(2)}   → false-accept ${f(curFar)}   miss ${f(curFrr)}`);
-  console.log();
-  const rec = farTarget ? farTarget.t : eer.t;
-  console.log(`recommendation: ${Math.abs(rec - CURRENT_JOIN) < 0.03 ? 'VP_JOIN is about right' : `set VP_JOIN ≈ ${rec.toFixed(2)}`}`);
-  console.log('note: synthetic / studio voices give an optimistic EER — real phone recordings are the real test.\n');
+  console.log('note: ~12s Common Voice samples are shorter than a real 1-2 min scam call — live numbers should be a touch better. s-norm needs a stored per-print cohort mean/std to use in production.\n');
 })();

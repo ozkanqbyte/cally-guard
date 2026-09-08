@@ -52,15 +52,16 @@ SA_PATH = os.environ.get("FIREBASE_SA", "/app/firebase-service-account.json")
 BUCKET = os.environ.get(
     "FIREBASE_STORAGE_BUCKET", "callypro-fcc43.firebasestorage.app"
 )
-# Thresholds calibrated on 60-speaker Common Voice TR, telephone-degraded, ~12s
-# samples (sim/voiceprint-eval.mjs): EER 4.0% @ cos 0.45; 0.1% false-accept @
-# 0.67. Community cluster-join is kept stricter than the personal block because
+# Scores are s-norm-calibrated to a 0..1 scale (see _calibrate / cohort.npy) so
+# these thresholds keep their old meaning. Eval on 250-speaker Common Voice TR,
+# phone-band, ~12s samples (sim/voiceprint-eval.mjs): raw cosine EER 1.7%,
+# s-norm EER 0.55%. Community cluster-join is stricter than the personal block —
 # a wrong *shared* merge can taint an innocent number; a personal block is the
-# user's own low-stakes call. Real scam calls run 1-2 min (vs 12s here) so the
-# live numbers are better. Both are live-tunable via guard_config/voiceprint.
-VP_JOIN = float(os.environ.get("VP_JOIN", "0.60"))   # cosine to join a community cluster
-VP_PERSONAL_JOIN = float(os.environ.get("VP_PERSONAL_JOIN", "0.52"))  # cosine for a personal-block hit
-VP_MATCH = float(os.environ.get("VP_MATCH", "0.45"))  # cosine worth showing at all
+# user's own low-stakes call. Real scam calls run 1-2 min (better than 12s).
+# All live-tunable via guard_config/voiceprint.
+VP_JOIN = float(os.environ.get("VP_JOIN", "0.62"))   # score to join a community cluster
+VP_PERSONAL_JOIN = float(os.environ.get("VP_PERSONAL_JOIN", "0.50"))  # score for a personal-block hit
+VP_MATCH = float(os.environ.get("VP_MATCH", "0.42"))  # score worth showing at all
 VP_MIN_CLUSTER_PUSH = int(os.environ.get("VP_MIN_CLUSTER_PUSH", "2"))  # size to warn the user
 VP_FLAG_MIN_SIZE = int(os.environ.get("VP_FLAG_MIN_SIZE", "3"))  # cluster size to flag its numbers at ring time
 VP_MAX_SEC = int(os.environ.get("VP_MAX_SEC", "25"))
@@ -92,12 +93,49 @@ _model.eval()
 _lock = threading.Lock()
 _ids: list[str] = []
 _mat = np.zeros((0, EMB_DIM), dtype=np.float32)
+_stats = np.zeros((0, 2), dtype=np.float32)   # per-print (cohort-mean, cohort-std) for s-norm
 _cluster_of: dict[str, str] = {}
+
+# ── s-norm cohort (adaptive symmetric normalisation) ────────────────────────
+# cut EER 1.7% -> 0.55% in the eval. cohort.npy = (N,192) L2-normed diverse
+# speaker embeddings; missing/broken -> the service falls back to raw cosine,
+# unchanged behaviour.
+COHORT_PATH = os.environ.get("VP_COHORT", "/app/cohort.npy")
+SN_CENTER = float(os.environ.get("VP_SN_CENTER", "2.2"))  # s-norm value that maps to 0.5
+SN_SCALE = float(os.environ.get("VP_SN_SCALE", "1.0"))
+try:
+    _cohort = np.load(COHORT_PATH).astype(np.float32)
+    _cohort = _cohort / np.clip(
+        np.linalg.norm(_cohort, axis=1, keepdims=True), 1e-9, None
+    )
+    print(f"[vp] s-norm cohort loaded: {_cohort.shape}")
+except Exception as e:  # noqa: BLE001
+    _cohort = np.zeros((0, EMB_DIM), np.float32)
+    print("[vp] no s-norm cohort — raw cosine:", e)
 
 
 def _l2(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     return v / n if n > 1e-9 else v
+
+
+def _cohort_stats(vec: np.ndarray) -> tuple[float, float]:
+    """(mean, std) of this embedding's cosine scores against the cohort."""
+    if _cohort.shape[0] == 0:
+        return (0.0, 1.0)
+    s = _cohort @ vec
+    return (float(s.mean()), float(s.std()) or 1e-6)
+
+
+def _calibrate(raw: float, probe_stats, target_stats) -> float:
+    """raw cosine + both s-norm stats -> a 0..1 score on the same scale the
+    thresholds always used. No cohort -> pass raw cosine straight through."""
+    if _cohort.shape[0] == 0:
+        return raw
+    pm, ps = probe_stats
+    tm, ts = target_stats
+    sn = 0.5 * ((raw - pm) / ps + (raw - tm) / ts)
+    return float(1.0 / (1.0 + np.exp(-(sn - SN_CENTER) / SN_SCALE)))
 
 
 def _trim_voiced(x: np.ndarray, sr: int) -> np.ndarray:
@@ -137,27 +175,34 @@ def embed_wav_bytes(raw: bytes) -> np.ndarray:
 
 
 def match(vec: np.ndarray, exclude: Optional[str] = None):
+    """Top matches as (callId, score) where score is s-norm-calibrated to 0..1
+    (or raw cosine if there's no cohort). Sorted best first."""
+    probe = _cohort_stats(vec)
     with _lock:
         if _mat.shape[0] == 0:
             return []
         sims = _mat @ vec
-        order = np.argsort(-sims)[:12]
+        order = np.argsort(-sims)[:16]
         out = []
         for i in order:
             cid = _ids[i]
             if cid == exclude:
                 continue
-            out.append((cid, float(sims[i])))
-    return out
+            tgt = tuple(_stats[i]) if _stats.shape[0] > i else (0.0, 1.0)
+            out.append((cid, _calibrate(float(sims[i]), probe, tgt)))
+    out.sort(key=lambda x: -x[1])
+    return out[:12]
 
 
 def _add_to_index(call_id: str, vec: np.ndarray, cluster_id: str) -> None:
-    global _mat
+    global _mat, _stats
+    st = np.asarray(_cohort_stats(vec), dtype=np.float32)[None, :]
     with _lock:
         _ids.append(call_id)
         _mat = (
             np.vstack([_mat, vec[None, :]]) if _mat.shape[0] else vec[None, :].copy()
         )
+        _stats = np.vstack([_stats, st]) if _stats.shape[0] else st.copy()
         _cluster_of[call_id] = cluster_id
 
 
@@ -480,9 +525,12 @@ def match_personal_block(uid: str, vec: np.ndarray):
         return None
     if mat.shape[0] == 0:
         return None
+    probe = _cohort_stats(vec)
     sims = mat @ vec
     i = int(np.argmax(sims))
-    score = float(sims[i])
+    # the stored block vec's cohort stats (tiny list, compute on the fly)
+    tgt = _cohort_stats(mat[i])
+    score = _calibrate(float(sims[i]), probe, tgt)
     if score < VP_PERSONAL_JOIN:
         return None
     return {
@@ -650,7 +698,7 @@ def process_recording(doc) -> None:
 
 
 def load_index() -> None:
-    global _mat, _ids
+    global _mat, _ids, _stats
     ids, vecs, cof = [], [], {}
     for doc in db.collection("guard_voiceprints").stream():
         d = doc.to_dict() or {}
@@ -660,12 +708,19 @@ def load_index() -> None:
         ids.append(doc.id)
         vecs.append(np.asarray(v, dtype=np.float32))
         cof[doc.id] = d.get("clusterId", "")
+    mat = np.vstack(vecs) if vecs else np.zeros((0, EMB_DIM), np.float32)
+    stats = (
+        np.vstack([np.asarray(_cohort_stats(v), np.float32) for v in vecs])
+        if vecs else np.zeros((0, 2), np.float32)
+    )
     with _lock:
         _ids = ids
-        _mat = np.vstack(vecs) if vecs else np.zeros((0, EMB_DIM), np.float32)
+        _mat = mat
+        _stats = stats
         _cluster_of.clear()
         _cluster_of.update(cof)
-    print(f"[vp] index loaded: {len(ids)} voiceprints")
+    print(f"[vp] index loaded: {len(ids)} voiceprints "
+          f"({'s-norm' if _cohort.shape[0] else 'raw cosine'})")
 
 
 def backfill_loop() -> None:
@@ -715,6 +770,8 @@ def health():
         "ok": True,
         "prints": len(_ids),
         "clusters": len(set(_cluster_of.values())),
+        "scoring": "s-norm" if _cohort.shape[0] else "raw-cosine",
+        "cohort": int(_cohort.shape[0]),
         "join": VP_JOIN,
         "personalJoin": VP_PERSONAL_JOIN,
         "match": VP_MATCH,
